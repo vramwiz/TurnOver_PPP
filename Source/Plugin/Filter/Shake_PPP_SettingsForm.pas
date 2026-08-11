@@ -40,10 +40,6 @@ type
     FDeformedBackground: TBitmap;
     FDeformationMap: TShakeDeformationMap;
     FDeformedDirty: Boolean;
-    FActiveCurveKind: TShakeCurveKind;
-    FActiveCurveSetIndex: Integer;
-    FCenterContour: TShakeCurve;
-    FCurveSets: TShakeCurveSets;
     FCurrentVertexKind: TShakeVertexKind;
     FDragging: Boolean;
     FDragOrigin: TPoint;
@@ -63,21 +59,20 @@ type
     FMotionVelocityX: Double;
     FMotionVelocityY: Double;
     FMotionMouseValid: Boolean;
+    FGripVertexIndices: TShakeGripPointVertexIndices;
+    FPreviewGripDragging: Integer;
+    FPreviewGripPositions: TShakeGripPositions;
+    FPreviewGripPositionsValid: Boolean;
     FSelectedVertex: Integer;
     FShowDeformed: Boolean;
     FPreviewRendering: Boolean;
     FOffset: TPoint;
     FOffsetOrigin: TPoint;
     FToolbar: TShakeToolbarButtons;
-    FToolbarCenterContour: TShakeToolbarButton;
     FToolbarCornerPoint: TShakeToolbarButton;
-    FToolbarDeformedView: TShakeToolbarButton;
-    FToolbarOriginalView: TShakeToolbarButton;
     FToolbarOuterContour: TShakeToolbarButton;
     FToolbarPan: TShakeToolbarButton;
     FToolbarSmoothPoint: TShakeToolbarButton;
-    FToolbarCurveSet1: TShakeToolbarButton;
-    FToolbarCurveSet2: TShakeToolbarButton;
     FVertexDragging: Boolean;
     FZoomPercent: Integer;
     function ActiveCurve: TShakeCurve;
@@ -89,19 +84,28 @@ type
     procedure CreateShapeToolbar;
     procedure DrawCurve(Canvas: TCanvas; Curve: TShakeCurve;
       CurveKind: TShakeCurveKind; IsActive: Boolean);
+    procedure DrawGripAssignments(Canvas: TCanvas);
+    procedure DrawGripAssignmentIcons(Canvas: TCanvas);
     procedure EnsureBackBuffer;
     procedure FitImage;
     function HitTestClosingSegment(X, Y: Integer): Boolean;
+    function HitTestGripAssignmentIcon(X, Y: Integer): Integer;
+    function HitTestPreviewGrip(X, Y: Integer): Integer;
     function HitTestSegment(X, Y: Integer): Integer;
     function HitTestVertex(X, Y: Integer): Integer;
     function NormalizedToCanvas(const Position: TPointF): TPoint;
     procedure MarkDeformationDirty;
+    procedure AdjustGripAssignmentsAfterDelete(VertexIndex: Integer);
+    procedure AdjustGripAssignmentsAfterInsert(VertexIndex: Integer);
+    procedure AssignGripPoint(GripIndex, VertexIndex: Integer);
     procedure FeedMotionFromMouse(X, Y: Integer);
+    procedure GripAssignmentIconRects(out Point1Rect, Point2Rect: TRect);
     procedure MotionTimerTick(Sender: TObject);
+    procedure ResetGripPreviewPositions;
     procedure ResetMotionPreview;
-    procedure SwitchCurveSet(Index: Integer);
     procedure UpdateToolbarSelection;
     function UpdateDeformedPreview: Boolean;
+    function UpdateGripPreview: Boolean;
     procedure SetEditorStatus;
     procedure ToolbarButtonExecute(Sender: TObject;
       Button: TShakeToolbarButton);
@@ -154,10 +158,7 @@ end;
 
 function TFormShakeSettings.ActiveCurve: TShakeCurve;
 begin
-  if FActiveCurveKind = sckOuterContour then
-    Result := FOuterContour
-  else
-    Result := FCenterContour;
+  Result := FOuterContour;
 end;
 
 function TFormShakeSettings.HitTestClosingSegment(X, Y: Integer): Boolean;
@@ -242,6 +243,198 @@ begin
     FSelectedVertex, CurrentPPI);
 end;
 
+procedure TFormShakeSettings.DrawGripAssignments(Canvas: TCanvas);
+const
+  GRIP_COLORS: array[0..1] of TColor = (TColor($002891FF), TColor($00FFB93C));
+var
+  GripIndex: Integer;
+  MarkerRect: TRect;
+  MarkerSize: Integer;
+  OriginalPoint: TPoint;
+  VertexIndex: Integer;
+  VertexPoint: TPoint;
+begin
+  { Assigned points are flat filled labels so they do not resemble controls. }
+  MarkerSize := Max(16, MulDiv(18, CurrentPPI, 96));
+  Canvas.Font.Style := [fsBold];
+  Canvas.Font.Color := clBlack;
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Pen.Width := 1;
+  for GripIndex := 0 to 1 do
+  begin
+    VertexIndex := FGripVertexIndices[GripIndex];
+    if (VertexIndex < 0) or (VertexIndex >= FOuterContour.Count) then
+      Continue;
+    OriginalPoint := NormalizedToCanvas(FOuterContour[VertexIndex].Position);
+    if FPanMode and FPreviewGripPositionsValid then
+    begin
+      VertexPoint := NormalizedToCanvas(FPreviewGripPositions[GripIndex]);
+      Canvas.Pen.Color := GRIP_COLORS[GripIndex];
+      Canvas.Pen.Style := psDot;
+      Canvas.MoveTo(OriginalPoint.X, OriginalPoint.Y);
+      Canvas.LineTo(VertexPoint.X, VertexPoint.Y);
+      Canvas.Pen.Style := psSolid;
+    end
+    else
+      VertexPoint := OriginalPoint;
+    MarkerRect := Rect(VertexPoint.X - MarkerSize div 2,
+      VertexPoint.Y - MarkerSize div 2,
+      VertexPoint.X - MarkerSize div 2 + MarkerSize,
+      VertexPoint.Y - MarkerSize div 2 + MarkerSize);
+    Canvas.Brush.Color := GRIP_COLORS[GripIndex];
+    Canvas.Pen.Color := GRIP_COLORS[GripIndex];
+    Canvas.Rectangle(MarkerRect);
+    DrawText(Canvas.Handle, PChar(IntToStr(GripIndex + 1)), -1, MarkerRect,
+      DT_CENTER or DT_VCENTER or DT_SINGLELINE);
+  end;
+  Canvas.Font.Style := [];
+  Canvas.Brush.Style := bsClear;
+end;
+
+function TFormShakeSettings.HitTestPreviewGrip(X, Y: Integer): Integer;
+var
+  GripIndex: Integer;
+  MarkerRadius: Integer;
+  VertexIndex: Integer;
+  VertexPoint: TPoint;
+begin
+  Result := -1;
+  if not FPanMode or not FPreviewGripPositionsValid then
+    Exit;
+  MarkerRadius := Max(10, MulDiv(12, CurrentPPI, 96));
+  for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+  begin
+    VertexIndex := FGripVertexIndices[GripIndex];
+    if (VertexIndex < 0) or (VertexIndex >= FOuterContour.Count) then
+      Continue;
+    VertexPoint := NormalizedToCanvas(FPreviewGripPositions[GripIndex]);
+    if (Abs(X - VertexPoint.X) <= MarkerRadius) and
+      (Abs(Y - VertexPoint.Y) <= MarkerRadius) then
+      Exit(GripIndex);
+  end;
+end;
+
+procedure TFormShakeSettings.GripAssignmentIconRects(out Point1Rect,
+  Point2Rect: TRect);
+var
+  Gap: Integer;
+  IconSize: Integer;
+  Left: Integer;
+  Top: Integer;
+  TotalWidth: Integer;
+  VertexPoint: TPoint;
+begin
+  Point1Rect := Rect(0, 0, 0, 0);
+  Point2Rect := Rect(0, 0, 0, 0);
+  if FPanMode or (FSelectedVertex < 0) or
+    (FSelectedVertex >= FOuterContour.Count) then
+    Exit;
+
+  IconSize := Max(18, MulDiv(20, CurrentPPI, 96));
+  Gap := Max(4, MulDiv(5, CurrentPPI, 96));
+  TotalWidth := IconSize * 2 + Gap;
+  VertexPoint := NormalizedToCanvas(
+    FOuterContour[FSelectedVertex].Position);
+  Left := VertexPoint.X - TotalWidth div 2;
+  Left := EnsureRange(Left, 2, Max(2, PreviewPaintBox.ClientWidth -
+    TotalWidth - 2));
+  Top := VertexPoint.Y - IconSize - Max(12, MulDiv(14, CurrentPPI, 96));
+  if Top < 2 then
+    Top := VertexPoint.Y + Max(12, MulDiv(14, CurrentPPI, 96));
+  Top := EnsureRange(Top, 2, Max(2, PreviewPaintBox.ClientHeight -
+    IconSize - 2));
+  Point1Rect := Rect(Left, Top, Left + IconSize, Top + IconSize);
+  Point2Rect := Rect(Point1Rect.Right + Gap, Top,
+    Point1Rect.Right + Gap + IconSize, Top + IconSize);
+end;
+
+procedure TFormShakeSettings.DrawGripAssignmentIcons(Canvas: TCanvas);
+const
+  GRIP_COLORS: array[0..1] of TColor = (TColor($002891FF), TColor($00FFB93C));
+var
+  ButtonRect: TRect;
+  GripIndex: Integer;
+  IconRects: array[0..1] of TRect;
+begin
+  GripAssignmentIconRects(IconRects[0], IconRects[1]);
+  if (IconRects[0].Right <= IconRects[0].Left) or
+    (IconRects[0].Bottom <= IconRects[0].Top) then
+    Exit;
+  Canvas.Font.Style := [fsBold];
+  Canvas.Brush.Style := bsSolid;
+  Canvas.Brush.Color := clBtnFace;
+  Canvas.Pen.Color := clBtnShadow;
+  Canvas.Pen.Width := 1;
+  for GripIndex := 0 to 1 do
+  begin
+    { The raised system edge and solid face identify these as clickable. }
+    ButtonRect := IconRects[GripIndex];
+    Canvas.Rectangle(ButtonRect);
+    DrawEdge(Canvas.Handle, ButtonRect, BDR_RAISEDINNER, BF_RECT);
+    Canvas.Font.Color := GRIP_COLORS[GripIndex];
+    DrawText(Canvas.Handle, PChar(IntToStr(GripIndex + 1)), -1,
+      ButtonRect, DT_CENTER or DT_VCENTER or DT_SINGLELINE);
+  end;
+  Canvas.Font.Style := [];
+  Canvas.Brush.Style := bsClear;
+end;
+
+function TFormShakeSettings.HitTestGripAssignmentIcon(X,
+  Y: Integer): Integer;
+var
+  IconRects: array[0..1] of TRect;
+begin
+  Result := -1;
+  GripAssignmentIconRects(IconRects[0], IconRects[1]);
+  if (X >= IconRects[0].Left) and (X < IconRects[0].Right) and
+    (Y >= IconRects[0].Top) and (Y < IconRects[0].Bottom) then
+    Exit(0);
+  if (X >= IconRects[1].Left) and (X < IconRects[1].Right) and
+    (Y >= IconRects[1].Top) and (Y < IconRects[1].Bottom) then
+    Result := 1;
+end;
+
+procedure TFormShakeSettings.AssignGripPoint(GripIndex,
+  VertexIndex: Integer);
+var
+  OtherGripIndex: Integer;
+  PreviousVertexIndex: Integer;
+begin
+  if (GripIndex < 0) or (GripIndex > 1) or
+    (VertexIndex < 0) or (VertexIndex >= FOuterContour.Count) then
+    Exit;
+  OtherGripIndex := 1 - GripIndex;
+  PreviousVertexIndex := FGripVertexIndices[GripIndex];
+  if FGripVertexIndices[OtherGripIndex] = VertexIndex then
+    FGripVertexIndices[OtherGripIndex] :=
+      PreviousVertexIndex;
+  FGripVertexIndices[GripIndex] := VertexIndex;
+  SetEditorStatus;
+  PreviewPaintBox.Invalidate;
+end;
+
+procedure TFormShakeSettings.AdjustGripAssignmentsAfterInsert(
+  VertexIndex: Integer);
+var
+  GripIndex: Integer;
+begin
+  for GripIndex := 0 to 1 do
+    if FGripVertexIndices[GripIndex] >= VertexIndex then
+      Inc(FGripVertexIndices[GripIndex]);
+end;
+
+procedure TFormShakeSettings.AdjustGripAssignmentsAfterDelete(
+  VertexIndex: Integer);
+var
+  GripIndex: Integer;
+begin
+  for GripIndex := 0 to 1 do
+    if FGripVertexIndices[GripIndex] = VertexIndex then
+      FGripVertexIndices[GripIndex] := -1
+    else if FGripVertexIndices[GripIndex] > VertexIndex then
+      Dec(FGripVertexIndices[GripIndex]);
+end;
+
 procedure TFormShakeSettings.MarkDeformationDirty;
 begin
   FDeformedDirty := True;
@@ -308,13 +501,13 @@ begin
   FMotionInputLogged := False;
   FMotionMouseValid := False;
   FMotionLastTick := GetTickCount64;
-  // Keep the lightweight timer alive to poll dragging even when the
-  // TPaintBox does not deliver mouse capture events on the host window.
-  FMotionTimer.Enabled := True;
+  { The turnover preview is driven directly by grip dragging. The inherited
+    whole-image shake timer remains disabled in this mode. }
+  FMotionTimer.Enabled := False;
   if (FDeformationMap.Width <> FBackground.Width) or
     (FDeformationMap.Height <> FBackground.Height) then
     if not FDeformationMap.Build(FBackground.Width, FBackground.Height,
-      FOuterContour, FCenterContour, ErrorText) then
+      FOuterContour, nil, ErrorText) then
     begin
       StatusLabel.Caption := '動作プレビュー：曲線を閉じてください。';
       Exit;
@@ -324,6 +517,26 @@ begin
   begin
     FDeformedDirty := False;
     PreviewPaintBox.Invalidate;
+  end;
+end;
+
+procedure TFormShakeSettings.ResetGripPreviewPositions;
+var
+  GripIndex: Integer;
+  VertexIndex: Integer;
+begin
+  FPreviewGripDragging := -1;
+  FPreviewGripPositionsValid := FPanMode;
+  if not FPreviewGripPositionsValid then
+    Exit;
+  for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+  begin
+    VertexIndex := FGripVertexIndices[GripIndex];
+    if (VertexIndex >= 0) and (VertexIndex < FOuterContour.Count) then
+      FPreviewGripPositions[GripIndex] :=
+        FOuterContour[VertexIndex].Position
+    else
+      FPreviewGripPositions[GripIndex] := PointF(-1, -1);
   end;
 end;
 
@@ -339,6 +552,16 @@ var
 begin
   if not FPanMode or not FShowDeformed or FPreviewRendering then
     Exit;
+  if FPreviewGripDragging >= 0 then
+  begin
+    if GetAsyncKeyState(VK_LBUTTON) >= 0 then
+    begin
+      FPreviewGripDragging := -1;
+      TControlAccess(PreviewPaintBox).MouseCapture := False;
+      PreviewPaintBox.Cursor := crDefault;
+    end;
+    Exit;
+  end;
   GetCursorPos(PointerPosition);
   PointerPosition := PreviewPaintBox.ScreenToClient(PointerPosition);
   { Polling is only a fallback for a drag that starts over the preview.
@@ -388,13 +611,11 @@ begin
       (FDeformationMap.Height <> FBackground.Height) then
     begin
       if not FDeformationMap.Build(FBackground.Width, FBackground.Height,
-        FOuterContour, FCenterContour, ErrorText) then
+        FOuterContour, nil, ErrorText) then
       begin
         FMotionTimer.Enabled := False;
         if ErrorText = 'OUTER_NOT_CLOSED' then
-          ErrorText := '外周を閉じてください。'
-        else if ErrorText = 'CENTER_NOT_CLOSED' then
-          ErrorText := '重心・頂点範囲を閉じてください。';
+          ErrorText := '外周を閉じてください。';
         StatusLabel.Caption := '動作プレビュー：' + ErrorText;
         Exit;
       end;
@@ -458,7 +679,7 @@ begin
   HorizontalDisplacement := FBackground.Width * 0.06;
   VerticalDisplacement := -FBackground.Height * 0.035;
   Result := FDeformationMap.Build(FBackground.Width, FBackground.Height,
-    FOuterContour, FCenterContour, ErrorText);
+    FOuterContour, nil, ErrorText);
   if Result then
     Result := FDeformationMap.Apply(FBackground, FDeformedBackground,
       HorizontalDisplacement, VerticalDisplacement, ErrorText);
@@ -473,11 +694,56 @@ begin
     if ErrorText = 'NO_IMAGE' then
       ErrorText := 'プレビュー画像がありません。'
     else if ErrorText = 'OUTER_NOT_CLOSED' then
-      ErrorText := '外周を閉じてください。'
-    else if ErrorText = 'CENTER_NOT_CLOSED' then
-      ErrorText := '重心・頂点範囲を閉じてください。';
+      ErrorText := '外周を閉じてください。';
     StatusLabel.Caption := '変形プレビュー：' + ErrorText;
     DebugLog('Static deformation preview rejected: ' + ErrorText);
+  end;
+end;
+
+function TFormShakeSettings.UpdateGripPreview: Boolean;
+var
+  Enabled: TShakeGripEnabled;
+  ErrorText: string;
+  GripIndex: Integer;
+  OriginalPositions: TShakeGripPositions;
+  VertexIndex: Integer;
+begin
+  Result := False;
+  if not FPanMode or not FPreviewGripPositionsValid then
+    Exit;
+  for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+  begin
+    VertexIndex := FGripVertexIndices[GripIndex];
+    Enabled[GripIndex] := (VertexIndex >= 0) and
+      (VertexIndex < FOuterContour.Count);
+    if Enabled[GripIndex] then
+      OriginalPositions[GripIndex] := FOuterContour[VertexIndex].Position
+    else
+      OriginalPositions[GripIndex] := PointF(0, 0);
+  end;
+  FPreviewRendering := True;
+  try
+    if (FDeformationMap.Width <> FBackground.Width) or
+      (FDeformationMap.Height <> FBackground.Height) then
+      if not FDeformationMap.Build(FBackground.Width, FBackground.Height,
+        FOuterContour, nil, ErrorText) then
+      begin
+        if ErrorText = 'NO_IMAGE' then
+          ErrorText := 'プレビュー画像がありません。'
+        else if ErrorText = 'OUTER_NOT_CLOSED' then
+          ErrorText := '外周を閉じてください。';
+        StatusLabel.Caption := 'めくりプレビュー：' + ErrorText;
+        Exit;
+      end;
+    Result := FDeformationMap.ApplyGripPreview(FBackground,
+      FDeformedBackground, OriginalPositions, FPreviewGripPositions,
+      Enabled, IsFullFrameClothRange(FOuterContour), ErrorText);
+    if Result then
+      FDeformedDirty := False
+    else
+      StatusLabel.Caption := 'めくりプレビュー：' + ErrorText;
+  finally
+    FPreviewRendering := False;
   end;
 end;
 
@@ -496,19 +762,12 @@ end;
 procedure TFormShakeSettings.CreateShapeToolbar;
 const
   TOOLBAR_OUTER_CONTOUR = 1;
-  TOOLBAR_CENTER_CONTOUR = 2;
   TOOLBAR_PAN = 3;
   TOOLBAR_CORNER_POINT = 4;
   TOOLBAR_SMOOTH_POINT = 5;
-  TOOLBAR_ORIGINAL_VIEW = 6;
-  TOOLBAR_DEFORMED_VIEW = 7;
   TOOLBAR_FIT = 8;
-  TOOLBAR_CURVE_SET_1 = 9;
-  TOOLBAR_CURVE_SET_2 = 10;
-  TOOLBAR_GROUP_CURVE_SET = 1;
   TOOLBAR_GROUP_EDIT_MODE = 2;
   TOOLBAR_GROUP_VERTEX_KIND = 3;
-  TOOLBAR_GROUP_VIEW = 4;
 var
   Extent: Integer;
 begin
@@ -516,35 +775,23 @@ begin
   FToolbar := TShakeToolbarButtons.Create(Self);
   FToolbar.Parent := TopPanel;
   FToolbar.SetBounds(MulDiv(8, CurrentPPI, 96),
-    MulDiv(4, CurrentPPI, 96), MulDiv(322, CurrentPPI, 96), Extent);
+    MulDiv(4, CurrentPPI, 96), MulDiv(160, CurrentPPI, 96), Extent);
   FToolbar.ButtonExtent := Extent;
   FToolbar.SeparatorExtent := MulDiv(6, CurrentPPI, 96);
   FToolbar.Color := TopPanel.Color;
   FToolbar.ParentBackground := False;
   FToolbar.OnButtonExecute := ToolbarButtonExecute;
-  FToolbarCurveSet1 := FToolbar.AddToggle('形状セット1',
-    stgCurveSet1, TOOLBAR_CURVE_SET_1, TOOLBAR_GROUP_CURVE_SET);
-  FToolbarCurveSet2 := FToolbar.AddToggle('形状セット2',
-    stgCurveSet2, TOOLBAR_CURVE_SET_2, TOOLBAR_GROUP_CURVE_SET);
-  FToolbar.AddSeparator;
-  FToolbarOuterContour := FToolbar.AddToggle('外周を編集',
+  FToolbarOuterContour := FToolbar.AddToggle('布の範囲を編集',
     stgOuterContour, TOOLBAR_OUTER_CONTOUR, TOOLBAR_GROUP_EDIT_MODE);
-  FToolbarCenterContour := FToolbar.AddToggle('重心・頂点範囲を編集',
-    stgCenterContour, TOOLBAR_CENTER_CONTOUR, TOOLBAR_GROUP_EDIT_MODE);
   FToolbar.AddSeparator;
   FToolbarPan := FToolbar.AddToggle(
-    '動作プレビュー（左ドラッグで画像を移動して揺らす）',
+    'めくりプレビュー（つまみ1・2をドラッグ）',
     stgMotionPreview, TOOLBAR_PAN, TOOLBAR_GROUP_EDIT_MODE);
   FToolbar.AddSeparator;
   FToolbarCornerPoint := FToolbar.AddToggle('鋭角頂点',
     stgCornerPoint, TOOLBAR_CORNER_POINT, TOOLBAR_GROUP_VERTEX_KIND);
   FToolbarSmoothPoint := FToolbar.AddToggle('滑らかな頂点',
     stgSmoothPoint, TOOLBAR_SMOOTH_POINT, TOOLBAR_GROUP_VERTEX_KIND);
-  FToolbar.AddSeparator;
-  FToolbarOriginalView := FToolbar.AddToggle('元画像',
-    stgOriginalView, TOOLBAR_ORIGINAL_VIEW, TOOLBAR_GROUP_VIEW);
-  FToolbarDeformedView := FToolbar.AddToggle('固定量の変形プレビュー',
-    stgDeformedView, TOOLBAR_DEFORMED_VIEW, TOOLBAR_GROUP_VIEW);
   FToolbar.AddCommand('全体表示', stgFit, TOOLBAR_FIT);
   FPanMode := False;
   FShowDeformed := False;
@@ -553,33 +800,14 @@ end;
 
 procedure TFormShakeSettings.UpdateToolbarSelection;
 begin
-  if FActiveCurveSetIndex = 0 then
-  begin
-    FToolbarCurveSet1.CheckState := stcsChecked;
-    FToolbarCurveSet2.CheckState := stcsUnchecked;
-  end
-  else
-  begin
-    FToolbarCurveSet1.CheckState := stcsUnchecked;
-    FToolbarCurveSet2.CheckState := stcsChecked;
-  end;
-
   if FPanMode then
   begin
     FToolbarOuterContour.CheckState := stcsUnchecked;
-    FToolbarCenterContour.CheckState := stcsUnchecked;
     FToolbarPan.CheckState := stcsChecked;
-  end
-  else if FActiveCurveKind = sckOuterContour then
-  begin
-    FToolbarOuterContour.CheckState := stcsChecked;
-    FToolbarCenterContour.CheckState := stcsUnchecked;
-    FToolbarPan.CheckState := stcsUnchecked;
   end
   else
   begin
-    FToolbarOuterContour.CheckState := stcsUnchecked;
-    FToolbarCenterContour.CheckState := stcsChecked;
+    FToolbarOuterContour.CheckState := stcsChecked;
     FToolbarPan.CheckState := stcsUnchecked;
   end;
 
@@ -594,16 +822,6 @@ begin
     FToolbarSmoothPoint.CheckState := stcsChecked;
   end;
 
-  if FShowDeformed then
-  begin
-    FToolbarOriginalView.CheckState := stcsUnchecked;
-    FToolbarDeformedView.CheckState := stcsChecked;
-  end
-  else
-  begin
-    FToolbarOriginalView.CheckState := stcsChecked;
-    FToolbarDeformedView.CheckState := stcsUnchecked;
-  end;
 end;
 
 procedure TFormShakeSettings.FitImage;
@@ -626,14 +844,9 @@ begin
   FMotionTimer.Enabled := False;
   FMotionTimer.Interval := 50;
   FMotionTimer.OnTimer := MotionTimerTick;
-  for I := 0 to SHAKE_CURVE_SET_COUNT - 1 do
-  begin
-    FCurveSets[I].OuterContour := TShakeCurve.Create;
-    FCurveSets[I].CenterContour := TShakeCurve.Create;
-  end;
-  FActiveCurveSetIndex := 0;
-  FOuterContour := FCurveSets[0].OuterContour;
-  FCenterContour := FCurveSets[0].CenterContour;
+  FOuterContour := TShakeCurve.Create;
+  for I := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+    FGripVertexIndices[I] := -1;
   FBackBuffer.PixelFormat := pf32bit;
   FDeformedBackground.PixelFormat := pf32bit;
   FDeformedDirty := True;
@@ -642,8 +855,9 @@ begin
     TControlAccess(PreviewPaintBox).ControlStyle + [csOpaque];
   FFitToWindow := True;
   FOffset := Point(0, 0);
-  FActiveCurveKind := sckOuterContour;
   FCurrentVertexKind := svkSmooth;
+  FPreviewGripDragging := -1;
+  FPreviewGripPositionsValid := False;
   FSelectedVertex := -1;
   FZoomPercent := 100;
   CreateShapeToolbar;
@@ -652,18 +866,12 @@ begin
 end;
 
 procedure TFormShakeSettings.FormDestroy(Sender: TObject);
-var
-  I: Integer;
 begin
   DebugLog('Settings form destroyed.');
   FMotionTimer.Enabled := False;
   FreeAndNil(FMotionTimer);
   FDeformationMap.Free;
-  for I := SHAKE_CURVE_SET_COUNT - 1 downto 0 do
-  begin
-    FCurveSets[I].CenterContour.Free;
-    FCurveSets[I].OuterContour.Free;
-  end;
+  FOuterContour.Free;
   FDeformedBackground.Free;
   FBackBuffer.Free;
   FBackground.Free;
@@ -720,6 +928,7 @@ procedure TFormShakeSettings.PreviewPaintBoxMouseDown(Sender: TObject;
   Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
 var
   Curve: TShakeCurve;
+  GripIndex: Integer;
   HitIndex: Integer;
   Position: TPointF;
   SegmentIndex: Integer;
@@ -727,11 +936,14 @@ begin
   FRightDownOnClosingSegment := False;
   if FPanMode and (Button = mbLeft) then
   begin
-    BeginPan(X, Y);
-    FMotionDragging := True;
-    FMotionMousePosition := Point(X, Y);
-    FMotionMouseValid := True;
-    DebugLog(Format('Motion drag started at %d,%d.', [X, Y]));
+    GripIndex := HitTestPreviewGrip(X, Y);
+    if GripIndex >= 0 then
+    begin
+      FPreviewGripDragging := GripIndex;
+      TControlAccess(PreviewPaintBox).MouseCapture := True;
+      PreviewPaintBox.Cursor := crSizeAll;
+      Exit;
+    end;
     Exit;
   end;
   if (Button = mbMiddle) or (FPanMode and (Button = mbRight)) then
@@ -739,12 +951,23 @@ begin
     BeginPan(X, Y);
     Exit;
   end;
+  if Button = mbLeft then
+  begin
+    GripIndex := HitTestGripAssignmentIcon(X, Y);
+    if GripIndex >= 0 then
+    begin
+      AssignGripPoint(GripIndex, FSelectedVertex);
+      Exit;
+    end;
+  end;
   Curve := ActiveCurve;
   HitIndex := HitTestVertex(X, Y);
   if Button = mbRight then
   begin
     if HitIndex >= 0 then
     begin
+      if Curve = FOuterContour then
+        AdjustGripAssignmentsAfterDelete(HitIndex);
       Curve.DeleteVertex(HitIndex);
       MarkDeformationDirty;
       if FShowDeformed then
@@ -766,8 +989,12 @@ begin
       Exit;
     SegmentIndex := HitTestSegment(X, Y);
     if SegmentIndex >= 0 then
+    begin
       HitIndex := Curve.InsertVertex(SegmentIndex + 1, Position,
-        FCurrentVertexKind)
+        FCurrentVertexKind);
+      if Curve = FOuterContour then
+        AdjustGripAssignmentsAfterInsert(HitIndex);
+    end
     else
       HitIndex := Curve.AddVertex(Position, FCurrentVertexKind);
     MarkDeformationDirty;
@@ -786,15 +1013,6 @@ begin
   case Button.Tag of
     1:
       begin
-        FActiveCurveKind := sckOuterContour;
-        FSelectedVertex := -1;
-        FPanMode := False;
-        FMotionTimer.Enabled := False;
-        FShowDeformed := False;
-      end;
-    2:
-      begin
-        FActiveCurveKind := sckCenterContour;
         FSelectedVertex := -1;
         FPanMode := False;
         FMotionTimer.Enabled := False;
@@ -807,6 +1025,7 @@ begin
         FPanMode := True;
         FShowDeformed := True;
         ResetMotionPreview;
+        ResetGripPreviewPositions;
       end;
     4:
       begin
@@ -826,25 +1045,13 @@ begin
           MarkDeformationDirty;
         end;
       end;
-    6:
-      begin
-        { Original view and motion preview cannot be active together. }
-        FPanMode := False;
-        FShowDeformed := False;
-        FMotionTimer.Enabled := False;
-      end;
-    7:
-      begin
-        FShowDeformed := True;
-        if FPanMode then
-          ResetMotionPreview;
-      end;
     8:
       FitImage;
-    9:
-      SwitchCurveSet(0);
-    10:
-      SwitchCurveSet(1);
+  end;
+  if not FPanMode then
+  begin
+    FPreviewGripDragging := -1;
+    FPreviewGripPositionsValid := False;
   end;
   UpdateToolbarSelection;
   SetEditorStatus;
@@ -853,25 +1060,29 @@ begin
   PreviewPaintBox.Invalidate;
 end;
 
-procedure TFormShakeSettings.SwitchCurveSet(Index: Integer);
-begin
-  if (Index < 0) or (Index >= SHAKE_CURVE_SET_COUNT) then
-    Exit;
-  FActiveCurveSetIndex := Index;
-  FOuterContour := FCurveSets[Index].OuterContour;
-  FCenterContour := FCurveSets[Index].CenterContour;
-  FSelectedVertex := -1;
-  MarkDeformationDirty;
-  if FPanMode then
-    ResetMotionPreview;
-end;
-
 procedure TFormShakeSettings.PreviewPaintBoxMouseMove(Sender: TObject;
   Shift: TShiftState; X, Y: Integer);
 var
   Position: TPointF;
 begin
-  if FPanMode and (ssLeft in Shift) then
+  if FPreviewGripDragging >= 0 then
+  begin
+    if not (ssLeft in Shift) then
+    begin
+      FPreviewGripDragging := -1;
+      TControlAccess(PreviewPaintBox).MouseCapture := False;
+      PreviewPaintBox.Cursor := crDefault;
+      Exit;
+    end;
+    if CanvasToNormalized(X, Y, True, Position) then
+    begin
+      FPreviewGripPositions[FPreviewGripDragging] := Position;
+      UpdateGripPreview;
+      PreviewPaintBox.Invalidate;
+    end;
+    Exit;
+  end;
+  if FPanMode and FMotionDragging and (ssLeft in Shift) then
   begin
     if not FMotionDragging then
     begin
@@ -917,6 +1128,14 @@ var
   FirstPoint: TPoint;
   Radius: Integer;
 begin
+  if (Button = mbLeft) and (FPreviewGripDragging >= 0) then
+  begin
+    FPreviewGripDragging := -1;
+    TControlAccess(PreviewPaintBox).MouseCapture := False;
+    PreviewPaintBox.Cursor := crDefault;
+    PreviewPaintBox.Invalidate;
+    Exit;
+  end;
   if (Button = mbLeft) and FMotionDragging then
   begin
     FMotionDragging := False;
@@ -938,6 +1157,8 @@ begin
       Radius := Max(7, MulDiv(10, CurrentPPI, 96));
       if DeltaX * DeltaX + DeltaY * DeltaY <= Radius * Radius then
       begin
+        if Curve = FOuterContour then
+          AdjustGripAssignmentsAfterDelete(Curve.Count - 1);
         Curve.DeleteVertex(Curve.Count - 1);
         Curve.Closed := True;
         MarkDeformationDirty;
@@ -1007,36 +1228,43 @@ begin
     BufferCanvas.StretchDraw(Destination, FDeformedBackground)
   else
     BufferCanvas.StretchDraw(Destination, FBackground);
-  if FActiveCurveKind = sckOuterContour then
-  begin
-    DrawCurve(BufferCanvas, FCenterContour, sckCenterContour, False);
-    DrawCurve(BufferCanvas, FOuterContour, sckOuterContour, True);
-  end
-  else
-  begin
-    DrawCurve(BufferCanvas, FOuterContour, sckOuterContour, False);
-    DrawCurve(BufferCanvas, FCenterContour, sckCenterContour, True);
-  end;
+  DrawCurve(BufferCanvas, FOuterContour, sckOuterContour, not FPanMode);
+  DrawGripAssignments(BufferCanvas);
+  DrawGripAssignmentIcons(BufferCanvas);
   PreviewPaintBox.Canvas.Draw(0, 0, FBackBuffer);
 end;
 
 procedure TFormShakeSettings.SetEditorStatus;
 const
-  CurveNames: array[TShakeCurveKind] of string =
-    ('外周', '重心・頂点範囲');
   VertexNames: array[TShakeVertexKind] of string =
     ('鋭角', '滑らか');
   ClosedNames: array[Boolean] of string = ('開', '閉');
+var
+  Grip1Text: string;
+  Grip2Text: string;
 begin
   if FPanMode then
-    StatusLabel.Caption := Format(
-      'セット%d・%s：動作プレビュー（左ドラッグで画像移動＋揺れ／右ドラッグは表示移動のみ）',
-      [FActiveCurveSetIndex + 1, CurveNames[FActiveCurveKind]])
+  begin
+    if IsFullFrameClothRange(FOuterContour) then
+      StatusLabel.Caption := 'めくりプレビュー［全面画像］：'
+    else
+      StatusLabel.Caption := 'めくりプレビュー［透明余白］：';
+    StatusLabel.Caption := StatusLabel.Caption +
+      'つまみ1・2を左ドラッグ（ドラッグ位置は保存されません）';
+  end
   else
+  begin
+    Grip1Text := '-';
+    Grip2Text := '-';
+    if FGripVertexIndices[0] >= 0 then
+      Grip1Text := IntToStr(FGripVertexIndices[0] + 1);
+    if FGripVertexIndices[1] >= 0 then
+      Grip2Text := IntToStr(FGripVertexIndices[1] + 1);
     StatusLabel.Caption := Format(
-      'セット%d・%s（%s）：左クリックで%s頂点を追加（線上では中間へ挿入）／頂点を右クリック削除／空所を右ドラッグ移動　頂点数 %d',
-      [FActiveCurveSetIndex + 1, CurveNames[FActiveCurveKind], ClosedNames[ActiveCurve.Closed],
-       VertexNames[FCurrentVertexKind], ActiveCurve.Count]);
+      '布の範囲（%s）：左クリックで%s頂点を追加（線上では中間へ挿入）／頂点を右クリック削除／空所を右ドラッグ移動　頂点数 %d　つまみ1:%s つまみ2:%s／頂点を選び、表示される1・2でつまみを割り当て',
+      [ClosedNames[FOuterContour.Closed], VertexNames[FCurrentVertexKind],
+       FOuterContour.Count, Grip1Text, Grip2Text]);
+  end;
 end;
 
 procedure TFormShakeSettings.SetBackgroundRgba(const Pixels: TBytes;
@@ -1086,7 +1314,8 @@ end;
 function TFormShakeSettings.TryLoadCurveDataText(const Text: string;
   out ErrorText: string): Boolean;
 begin
-  Result := TryDecodeCurveSets(Text, FCurveSets, ErrorText);
+  Result := TryDecodeTurnOverCurveData(Text, FOuterContour,
+    FGripVertexIndices, ErrorText);
   if Result then
   begin
     FSelectedVertex := -1;
@@ -1099,7 +1328,8 @@ end;
 function TFormShakeSettings.TrySaveCurveDataText(
   out Text, ErrorText: string): Boolean;
 begin
-  Result := TryEncodeCurveSets(FCurveSets, Text, ErrorText);
+  Result := TryEncodeTurnOverCurveData(FOuterContour,
+    FGripVertexIndices, Text, ErrorText);
 end;
 
 end.

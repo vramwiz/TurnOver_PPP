@@ -18,14 +18,21 @@ end;
 var
   Center: TShakeCurve;
   DecodedCenter: TShakeCurve;
+  DecodedGrips: TShakeGripVertexIndices;
   DecodedOuter: TShakeCurve;
   DecodedSets: TShakeCurveSets;
   ErrorText: string;
   I: Integer;
+  InvalidText: string;
+  J: Integer;
+  LegacyGripText: string;
   OldText: string;
   Outer: TShakeCurve;
+  Grips: TShakeGripVertexIndices;
   Sets: TShakeCurveSets;
   Text: string;
+  TurnOverGrips: TShakeGripPointVertexIndices;
+  DecodedTurnOverGrips: TShakeGripPointVertexIndices;
 begin
   Outer := TShakeCurve.Create;
   Center := TShakeCurve.Create;
@@ -39,6 +46,11 @@ begin
   begin
     DecodedSets[I].OuterContour := TShakeCurve.Create;
     DecodedSets[I].CenterContour := TShakeCurve.Create;
+    for J := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+    begin
+      Grips[I, J] := -1;
+      DecodedGrips[I, J] := -1;
+    end;
   end;
   try
     Outer.AddVertex(PointF(0.1, 0.2), svkSmooth);
@@ -71,10 +83,55 @@ begin
       'Set 2 outer curve changed.');
     Require(DecodedSets[1].CenterContour[0].Kind = svkSmooth,
       'Set 2 center vertex kind changed.');
-    Require(TryDecodeCurveSets(OldText, DecodedSets, ErrorText), ErrorText);
+    Grips[0, 0] := 0;
+    Grips[0, 1] := 2;
+    Grips[1, 0] := 0;
+    Require(TryEncodeCurveSets(Sets, Grips, Text, ErrorText), ErrorText);
+    LegacyGripText := Text;
+    Require(Text.StartsWith('SPP3|'), 'Grip format prefix is invalid.');
+    Require(TryDecodeCurveSets(Text, DecodedSets, DecodedGrips,
+      ErrorText), ErrorText);
+    Require((DecodedGrips[0, 0] = 0) and (DecodedGrips[0, 1] = 2) and
+      (DecodedGrips[1, 0] = 0) and (DecodedGrips[1, 1] = -1),
+      'Grip assignments changed.');
+    InvalidText := StringReplace(Text, '1G,0,2', '1G,0,0', []);
+    Require(not TryDecodeCurveSets(InvalidText, DecodedSets, DecodedGrips,
+      ErrorText), 'Duplicate grip assignments were accepted.');
+    Require((DecodedGrips[0, 0] = 0) and (DecodedGrips[0, 1] = 2),
+      'Malformed grip data modified the current assignments.');
+    TurnOverGrips[0] := 0;
+    TurnOverGrips[1] := 2;
+    DecodedTurnOverGrips[0] := -1;
+    DecodedTurnOverGrips[1] := -1;
+    Require(TryEncodeTurnOverCurveData(Outer, TurnOverGrips,
+      Text, ErrorText), ErrorText);
+    Require(Text.StartsWith('TPP1|'), 'TurnOver format prefix is invalid.');
+    Require(TryDecodeTurnOverCurveData(Text, DecodedOuter,
+      DecodedTurnOverGrips, ErrorText), ErrorText);
+    Require((DecodedOuter.Count = 3) and (DecodedTurnOverGrips[0] = 0) and
+      (DecodedTurnOverGrips[1] = 2), 'TurnOver data changed.');
+    Require(TryDecodeCurveSets(Text, DecodedSets, ErrorText), ErrorText);
+    Require((DecodedSets[0].OuterContour.Count = 3) and
+      (DecodedSets[1].OuterContour.Count = 0),
+      'Runtime compatibility conversion for TPP1 failed.');
+    Require(TryDecodeTurnOverCurveData(LegacyGripText, DecodedOuter,
+      DecodedTurnOverGrips, ErrorText), ErrorText);
+    Require((DecodedTurnOverGrips[0] = 0) and
+      (DecodedTurnOverGrips[1] = 2),
+      'SPP3 to TurnOver compatibility conversion failed.');
+    Require(TryDecodeCurveSets(OldText, DecodedSets, DecodedGrips,
+      ErrorText), ErrorText);
     Require((DecodedSets[0].OuterContour.Count = 3) and
       (DecodedSets[1].OuterContour.Count = 0),
       'SPP1 compatibility conversion failed.');
+    Require((DecodedGrips[0, 0] = -1) and (DecodedGrips[0, 1] = -1),
+      'SPP1 compatibility did not clear grip assignments.');
+    Require(TryDecodeTurnOverCurveData(OldText, DecodedOuter,
+      DecodedTurnOverGrips, ErrorText), ErrorText);
+    Require((DecodedOuter.Count = 3) and
+      (DecodedTurnOverGrips[0] = -1) and
+      (DecodedTurnOverGrips[1] = -1),
+      'SPP1 to TurnOver compatibility conversion failed.');
 
     Require(not TryDecodeCurveData('SPP1|O,1;bad|C,0',
       DecodedOuter, DecodedCenter, ErrorText),

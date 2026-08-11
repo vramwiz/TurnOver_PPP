@@ -6,6 +6,8 @@ uses
   Vcl.Graphics,
   Shake_PPP_CurveModel;
 
+function IsFullFrameClothRange(OuterContour: TShakeCurve): Boolean;
+
 type
   TShakeDeformationMap = class
   private
@@ -23,6 +25,17 @@ type
       CenterContour: TShakeCurve; out ErrorText: string): Boolean;
     function Apply(Source, Destination: TBitmap;
       DisplacementX, DisplacementY: Double;
+      out ErrorText: string): Boolean;
+    function ApplyGripPreview(Source, Destination: TBitmap;
+      const OriginalPositions, TargetPositions: TShakeGripPositions;
+      const Enabled: TShakeGripEnabled; FullFrameMode: Boolean;
+      out ErrorText: string): Boolean;
+    function ApplyGripRgba(Source, Destination: Pointer;
+      const OriginalPositions, TargetPositions: TShakeGripPositions;
+      const Enabled: TShakeGripEnabled; FoldStrength, LightingStrength,
+      BacksideStrength, InfluenceRadius, CastShadowStrength: Double;
+      RippleStrength, RippleCount, RipplePhase,
+      RippleDirectionDegrees: Double; FullFrameMode: Boolean;
       out ErrorText: string): Boolean;
     function ApplyRgba(Source, Destination: Pointer;
       DisplacementX, DisplacementY: Double;
@@ -56,6 +69,15 @@ uses
 
 const
   CURVE_SAMPLES_PER_SEGMENT = 12;
+  GRIP_BACKSIDE_DARKENING = 0.08;
+  GRIP_BACKSIDE_DESATURATION = 0.28;
+  GRIP_CAST_SHADOW_RADIUS = 0.025;
+  GRIP_FOLD_SHADOW_GAIN = 0.70;
+  GRIP_LIFT_LIGHT_GAIN = 0.25;
+  GRIP_MAX_FORESHORTENING = 0.22;
+  GRIP_PREVIEW_BACKSIDE_STRENGTH = 0.35;
+  GRIP_PREVIEW_CAST_SHADOW_STRENGTH = 0.25;
+  GRIP_FORESHORTENING_GAIN = 0.45;
   MASK_GRID_SIZE = 4;
   VARIABLE_OUTER_MOTION_RATIO = 0.35;
 
@@ -64,6 +86,37 @@ type
   TBitmapRows = array of PByte;
   PByteRow = ^TByteRow;
   TByteRow = array[0..268435455] of Byte;
+
+function IsFullFrameClothRange(OuterContour: TShakeCurve): Boolean;
+const
+  EDGE_THRESHOLD = 0.015;
+var
+  I: Integer;
+  MaximumX: Double;
+  MaximumY: Double;
+  MinimumX: Double;
+  MinimumY: Double;
+begin
+  Result := False;
+  if (OuterContour = nil) or not OuterContour.Closed or
+    (OuterContour.Count < 3) then
+    Exit;
+  MinimumX := 1;
+  MinimumY := 1;
+  MaximumX := 0;
+  MaximumY := 0;
+  for I := 0 to OuterContour.Count - 1 do
+  begin
+    MinimumX := Min(MinimumX, OuterContour[I].Position.X);
+    MinimumY := Min(MinimumY, OuterContour[I].Position.Y);
+    MaximumX := Max(MaximumX, OuterContour[I].Position.X);
+    MaximumY := Max(MaximumY, OuterContour[I].Position.Y);
+  end;
+  Result := (MinimumX <= EDGE_THRESHOLD) and
+    (MinimumY <= EDGE_THRESHOLD) and
+    (MaximumX >= 1 - EDGE_THRESHOLD) and
+    (MaximumY >= 1 - EDGE_THRESHOLD);
+end;
 
 function CubicPoint(const Point0, Control1, Control2, Point3: TPointF;
   T: Double): TPointF;
@@ -232,6 +285,18 @@ begin
     Mask[Y1 * GridWidth + X1] * FX) * FY;
 end;
 
+function OuterOnlyMaskValue(const OuterPolygon: TArray<TPointF>;
+  X, Y, Aspect: Double): Double;
+const
+  EDGE_FADE_DISTANCE = 0.035;
+begin
+  if not PointInPolygon(OuterPolygon, X, Y) then
+    Exit(0);
+  Result := EnsureRange(DistanceToPolygon(OuterPolygon, X, Y, Aspect) /
+    EDGE_FADE_DISTANCE, 0.0, 1.0);
+  Result := Result * Result * (3 - 2 * Result);
+end;
+
 {$IFDEF DEBUG}
 procedure DebugLogCurveCoordinates(const CurveName: string;
   Curve: TShakeCurve; const Polygon: TArray<TPointF>;
@@ -304,6 +369,7 @@ var
   AffectedRight: Integer;
   AffectedTop: Integer;
   ScreenY: Integer;
+  UseCenterContour: Boolean;
 {$IFDEF DEBUG}
   AffectedCount: NativeInt;
   StartedAt: UInt64;
@@ -326,15 +392,13 @@ begin
     ErrorText := 'OUTER_NOT_CLOSED';
     Exit;
   end;
-  if (CenterContour = nil) or not CenterContour.Closed or
-    (CenterContour.Count < 3) then
-  begin
-    ErrorText := 'CENTER_NOT_CLOSED';
-    Exit;
-  end;
-
   OuterPolygon := FlattenCurve(OuterContour);
-  CenterPolygon := FlattenCurve(CenterContour);
+  UseCenterContour := (CenterContour <> nil) and CenterContour.Closed and
+    (CenterContour.Count >= 3);
+  if UseCenterContour then
+    CenterPolygon := FlattenCurve(CenterContour)
+  else
+    CenterPolygon := nil;
   Aspect := Width / Height;
   GridWidth := (Width + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
   GridHeight := (Height + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
@@ -347,17 +411,24 @@ begin
   StartedAt := GetTickCount64;
   DebugLogCurveCoordinates('outer', OuterContour, OuterPolygon,
     Width, Height);
-  DebugLogCurveCoordinates('center', CenterContour, CenterPolygon,
-    Width, Height);
+  if UseCenterContour then
+    DebugLogCurveCoordinates('center', CenterContour, CenterPolygon,
+      Width, Height);
   AffectedCount := 0;
 {$ENDIF}
   for GridY := 0 to GridHeight - 1 do
     for GridX := 0 to GridWidth - 1 do
-      Mask[GridY * GridWidth + GridX] := MaskValue(OuterPolygon,
-        CenterPolygon, Min(GridX * MASK_GRID_SIZE, Width - 1) /
-        Max(1, Width - 1),
-        1 - Min(GridY * MASK_GRID_SIZE, Height - 1) /
-        Max(1, Height - 1), Aspect);
+      if UseCenterContour then
+        Mask[GridY * GridWidth + GridX] := MaskValue(OuterPolygon,
+          CenterPolygon, Min(GridX * MASK_GRID_SIZE, Width - 1) /
+          Max(1, Width - 1),
+          1 - Min(GridY * MASK_GRID_SIZE, Height - 1) /
+          Max(1, Height - 1), Aspect)
+      else
+        Mask[GridY * GridWidth + GridX] := OuterOnlyMaskValue(OuterPolygon,
+          Min(GridX * MASK_GRID_SIZE, Width - 1) / Max(1, Width - 1),
+          1 - Min(GridY * MASK_GRID_SIZE, Height - 1) /
+          Max(1, Height - 1), Aspect);
   FWidth := Width;
   FHeight := Height;
   SetLength(FWeights, FWidth * FHeight);
@@ -510,6 +581,247 @@ begin
   Result := True;
 end;
 
+function TShakeDeformationMap.ApplyGripPreview(Source,
+  Destination: Vcl.Graphics.TBitmap; const OriginalPositions,
+  TargetPositions: TShakeGripPositions; const Enabled: TShakeGripEnabled;
+  FullFrameMode: Boolean; out ErrorText: string): Boolean;
+var
+  BacksideGray: Double;
+  BacksideWeight: Double;
+  Channel: Integer;
+  DestinationRow: PByteRow;
+  DestinationRows: TBitmapRows;
+  DistanceSquared: Double;
+  DX: Double;
+  DY: Double;
+  FoldBand: Double;
+  FoldShade: Double;
+  FX: Double;
+  FY: Double;
+  GripDX: Double;
+  GripDY: Double;
+  GripForeshortening: Double;
+  GripIndex: Integer;
+  GripWeight: Double;
+  Influence: Double;
+  LiftLight: Double;
+  MaskWeight: Double;
+  OutsideDistance: Double;
+  PathOffsetX: Double;
+  PathOffsetY: Double;
+  PixelOffset0: Integer;
+  PixelOffset1: Integer;
+  RadiusSquared: Double;
+  Row0: PByteRow;
+  Row1: PByteRow;
+  SampleX: Double;
+  SampleY: Double;
+  SampledChannels: array[0..3] of Double;
+  ShadowAlpha: Integer;
+  ShadowRadius: Double;
+  SourceRows: TBitmapRows;
+  TotalWeight: Double;
+  Value: Double;
+  WeightedDX: Double;
+  WeightedDY: Double;
+  WeightedForeshortening: Double;
+  WeightedForeshorteningX: Double;
+  WeightedForeshorteningY: Double;
+  X: Integer;
+  XEnd: Integer;
+  X0: Integer;
+  X1: Integer;
+  XStart: Integer;
+  Y: Integer;
+  YEnd: Integer;
+  Y0: Integer;
+  Y1: Integer;
+  YStart: Integer;
+
+  function DistanceSquaredToGripPath(Grip: Integer;
+    PixelX, PixelY: Double; out OffsetX, OffsetY: Double): Double;
+  var
+    LengthSquared: Double;
+    OriginX: Double;
+    OriginY: Double;
+    PathX: Double;
+    PathY: Double;
+    Projection: Double;
+    TargetX: Double;
+    TargetY: Double;
+  begin
+    OriginX := OriginalPositions[Grip].X * Max(1, FWidth - 1);
+    OriginY := OriginalPositions[Grip].Y * Max(1, FHeight - 1);
+    TargetX := TargetPositions[Grip].X * Max(1, FWidth - 1);
+    TargetY := TargetPositions[Grip].Y * Max(1, FHeight - 1);
+    PathX := TargetX - OriginX;
+    PathY := TargetY - OriginY;
+    LengthSquared := PathX * PathX + PathY * PathY;
+    if LengthSquared > 1.0E-9 then
+      Projection := EnsureRange(((PixelX - OriginX) * PathX +
+        (PixelY - OriginY) * PathY) / LengthSquared, 0.0, 1.0)
+    else
+      Projection := 0;
+    OffsetX := PixelX - (OriginX + PathX * Projection);
+    OffsetY := PixelY - (OriginY + PathY * Projection);
+    Result := Sqr(OffsetX) + Sqr(OffsetY);
+  end;
+
+begin
+  Result := False;
+  ErrorText := '';
+  if (Source = nil) or (Destination = nil) or
+    (Source.Width <> FWidth) or (Source.Height <> FHeight) or
+    (Length(FWeights) <> FWidth * FHeight) then
+  begin
+    ErrorText := 'MAP_NOT_READY';
+    Exit;
+  end;
+  Source.PixelFormat := pf32bit;
+  Destination.PixelFormat := pf32bit;
+  Destination.SetSize(Source.Width, Source.Height);
+  SetLength(SourceRows, Source.Height);
+  SetLength(DestinationRows, Destination.Height);
+  for Y := 0 to Source.Height - 1 do
+  begin
+    SourceRows[Y] := Source.ScanLine[Source.Height - 1 - Y];
+    DestinationRows[Y] := Destination.ScanLine[Destination.Height - 1 - Y];
+    Move(SourceRows[Y]^, DestinationRows[Y]^, NativeInt(Source.Width) * 4);
+  end;
+  RadiusSquared := Sqr(Max(FWidth, FHeight) * 0.38);
+  ShadowRadius := Max(1.0, Max(FWidth, FHeight) * GRIP_CAST_SHADOW_RADIUS);
+  if FullFrameMode then
+  begin
+    XStart := 0;
+    YStart := 0;
+    XEnd := FWidth - 1;
+    YEnd := FHeight - 1;
+  end
+  else
+  begin
+    XStart := FActiveLeft;
+    YStart := FActiveTop;
+    XEnd := FActiveRight;
+    YEnd := FActiveBottom;
+  end;
+  for Y := YStart to YEnd do
+  begin
+    DestinationRow := PByteRow(DestinationRows[Y]);
+    for X := XStart to XEnd do
+    begin
+      if FullFrameMode then
+        MaskWeight := 1
+      else
+        MaskWeight := Sqr(FWeights[(FHeight - 1 - Y) * FWidth + X]);
+      if MaskWeight <= 0 then
+        Continue;
+      TotalWeight := 0;
+      WeightedDX := 0;
+      WeightedDY := 0;
+      WeightedForeshortening := 0;
+      WeightedForeshorteningX := 0;
+      WeightedForeshorteningY := 0;
+      Influence := 0;
+      for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+      begin
+        if not Enabled[GripIndex] then
+          Continue;
+        DistanceSquared := DistanceSquaredToGripPath(GripIndex, X, Y,
+          PathOffsetX, PathOffsetY);
+        GripWeight := Exp(-2 * DistanceSquared / RadiusSquared);
+        GripDX := (TargetPositions[GripIndex].X -
+          OriginalPositions[GripIndex].X) * Max(1, FWidth - 1);
+        { Normalized editor Y grows downward, while the TBitmap sampling rows
+          used by this preview grow in the opposite direction. }
+        GripDY := (OriginalPositions[GripIndex].Y -
+          TargetPositions[GripIndex].Y) * Max(1, FHeight - 1);
+        GripForeshortening := Min(GRIP_MAX_FORESHORTENING,
+          Sqrt(GripDX * GripDX + GripDY * GripDY) /
+          Max(FWidth, FHeight) * GRIP_FORESHORTENING_GAIN);
+        TotalWeight := TotalWeight + GripWeight;
+        WeightedDX := WeightedDX + GripDX * GripWeight;
+        WeightedDY := WeightedDY + GripDY * GripWeight;
+        WeightedForeshortening := WeightedForeshortening +
+          GripForeshortening * GripWeight;
+        WeightedForeshorteningX := WeightedForeshorteningX +
+          PathOffsetX * GripForeshortening * GripWeight;
+        WeightedForeshorteningY := WeightedForeshorteningY +
+          PathOffsetY * GripForeshortening * GripWeight;
+        Influence := Max(Influence, GripWeight);
+      end;
+      if TotalWeight <= 1.0E-9 then
+        Continue;
+      DX := WeightedDX / TotalWeight * Influence * MaskWeight;
+      DY := WeightedDY / TotalWeight * Influence * MaskWeight;
+      FoldBand := 4 * Influence * (1 - Influence);
+      FoldShade := 1 - WeightedForeshortening / TotalWeight *
+        GRIP_FOLD_SHADOW_GAIN * FoldBand * MaskWeight;
+      LiftLight := 1 + WeightedForeshortening / TotalWeight *
+        GRIP_LIFT_LIGHT_GAIN * Sqr(Influence) * MaskWeight;
+      { Pull source samples away from each grip path.  The destination image
+        consequently narrows toward that path, giving the lifted portion a
+        simple fold/foreshortening cue without changing the grip endpoint. }
+      SampleX := X - DX + WeightedForeshorteningX / TotalWeight *
+        Influence * MaskWeight;
+      SampleY := Y - DY + WeightedForeshorteningY / TotalWeight *
+        Influence * MaskWeight;
+      if FullFrameMode and ((SampleX < 0) or (SampleX > FWidth - 1) or
+        (SampleY < 0) or (SampleY > FHeight - 1)) then
+      begin
+        OutsideDistance := Max(Max(-SampleX, SampleX - (FWidth - 1)),
+          Max(-SampleY, SampleY - (FHeight - 1)));
+        ShadowAlpha := EnsureRange(Round(255 *
+          GRIP_PREVIEW_CAST_SHADOW_STRENGTH *
+          Exp(-OutsideDistance / ShadowRadius)), 0, 255);
+        for Channel := 0 to 2 do
+          DestinationRow[X * 4 + Channel] := 0;
+        DestinationRow[X * 4 + 3] := ShadowAlpha;
+        Continue;
+      end;
+      SampleX := EnsureRange(SampleX, 0.0, FWidth - 1.0);
+      SampleY := EnsureRange(SampleY, 0.0, FHeight - 1.0);
+      X0 := Trunc(SampleX);
+      Y0 := Trunc(SampleY);
+      X1 := Min(X0 + 1, FWidth - 1);
+      Y1 := Min(Y0 + 1, FHeight - 1);
+      FX := SampleX - X0;
+      FY := SampleY - Y0;
+      Row0 := PByteRow(SourceRows[Y0]);
+      Row1 := PByteRow(SourceRows[Y1]);
+      PixelOffset0 := X0 * 4;
+      PixelOffset1 := X1 * 4;
+      for Channel := 0 to 3 do
+      begin
+        Value := (Row0[PixelOffset0 + Channel] * (1 - FX) +
+          Row0[PixelOffset1 + Channel] * FX) * (1 - FY) +
+          (Row1[PixelOffset0 + Channel] * (1 - FX) +
+          Row1[PixelOffset1 + Channel] * FX) * FY;
+        SampledChannels[Channel] := Value;
+      end;
+      BacksideGray := (SampledChannels[0] + SampledChannels[1] +
+        SampledChannels[2]) / 3;
+      BacksideWeight := EnsureRange(WeightedForeshortening / TotalWeight /
+        GRIP_MAX_FORESHORTENING * Sqr(Influence) * MaskWeight *
+        GRIP_PREVIEW_BACKSIDE_STRENGTH, 0.0, 1.0);
+      for Channel := 0 to 3 do
+      begin
+        Value := SampledChannels[Channel];
+        if Channel < 3 then
+        begin
+          Value := Value * (1 - GRIP_BACKSIDE_DESATURATION *
+            BacksideWeight) + BacksideGray * GRIP_BACKSIDE_DESATURATION *
+            BacksideWeight;
+          Value := Value * FoldShade * LiftLight *
+            (1 - GRIP_BACKSIDE_DARKENING * BacksideWeight);
+        end;
+        DestinationRow[X * 4 + Channel] :=
+          EnsureRange(Round(Value), 0, 255);
+      end;
+    end;
+  end;
+  Result := True;
+end;
+
 function TShakeDeformationMap.ApplyRgba(Source, Destination: Pointer;
   DisplacementX, DisplacementY: Double;
   out ErrorText: string): Boolean;
@@ -588,6 +900,274 @@ begin
       end;
     end;
   end;
+  Result := True;
+end;
+
+function TShakeDeformationMap.ApplyGripRgba(Source, Destination: Pointer;
+  const OriginalPositions, TargetPositions: TShakeGripPositions;
+  const Enabled: TShakeGripEnabled; FoldStrength, LightingStrength,
+  BacksideStrength, InfluenceRadius, CastShadowStrength: Double;
+  RippleStrength, RippleCount, RipplePhase,
+  RippleDirectionDegrees: Double; FullFrameMode: Boolean;
+  out ErrorText: string): Boolean;
+type
+  PRgbaBytes = ^TRgbaBytes;
+  TRgbaBytes = array[0..268435455] of Byte;
+var
+  BacksideGray: Double;
+  BacksideWeight: Double;
+  Channel: Integer;
+  DestinationBytes: PRgbaBytes;
+  DestinationOffset: NativeInt;
+  DistanceSquared: Double;
+  DX: Double;
+  DY: Double;
+  FoldBand: Double;
+  FoldShade: Double;
+  FX: Double;
+  FY: Double;
+  GripDX: Double;
+  GripDY: Double;
+  GripForeshortening: Double;
+  GripIndex: Integer;
+  GripWeight: Double;
+  Influence: Double;
+  LiftLight: Double;
+  MaskWeight: Double;
+  OutsideDistance: Double;
+  PathOffsetX: Double;
+  PathOffsetY: Double;
+  PixelOffset00: NativeInt;
+  PixelOffset01: NativeInt;
+  PixelOffset10: NativeInt;
+  PixelOffset11: NativeInt;
+  RadiusSquared: Double;
+  Ripple: Double;
+  RippleCoordinate: Double;
+  RippleDirectionCosine: Double;
+  RippleDirectionRadians: Double;
+  RippleDirectionSine: Double;
+  SampleX: Double;
+  SampleY: Double;
+  SampledChannels: array[0..3] of Double;
+  ShadowAlpha: Integer;
+  ShadowRadius: Double;
+  SourceBytes: PRgbaBytes;
+  TotalWeight: Double;
+  Value: Double;
+  WeightedDX: Double;
+  WeightedDY: Double;
+  WeightedForeshortening: Double;
+  WeightedForeshorteningX: Double;
+  WeightedForeshorteningY: Double;
+  X: Integer;
+  XEnd: Integer;
+  X0: Integer;
+  X1: Integer;
+  XStart: Integer;
+  Y: Integer;
+  YEnd: Integer;
+  Y0: Integer;
+  Y1: Integer;
+  YStart: Integer;
+
+  function DistanceSquaredToGripPath(Grip: Integer;
+    PixelX, PixelY: Double; out OffsetX, OffsetY: Double): Double;
+  var
+    LengthSquared: Double;
+    OriginX: Double;
+    OriginY: Double;
+    PathX: Double;
+    PathY: Double;
+    Projection: Double;
+    TargetX: Double;
+    TargetY: Double;
+  begin
+    OriginX := OriginalPositions[Grip].X * Max(1, FWidth - 1);
+    OriginY := OriginalPositions[Grip].Y * Max(1, FHeight - 1);
+    TargetX := TargetPositions[Grip].X * Max(1, FWidth - 1);
+    TargetY := TargetPositions[Grip].Y * Max(1, FHeight - 1);
+    PathX := TargetX - OriginX;
+    PathY := TargetY - OriginY;
+    LengthSquared := PathX * PathX + PathY * PathY;
+    if LengthSquared > 1.0E-9 then
+      Projection := EnsureRange(((PixelX - OriginX) * PathX +
+        (PixelY - OriginY) * PathY) / LengthSquared, 0.0, 1.0)
+    else
+      Projection := 0;
+    OffsetX := PixelX - (OriginX + PathX * Projection);
+    OffsetY := PixelY - (OriginY + PathY * Projection);
+    Result := Sqr(OffsetX) + Sqr(OffsetY);
+  end;
+
+begin
+  Result := False;
+  ErrorText := '';
+  if (Source = nil) or (Destination = nil) or (FWidth <= 0) or
+    (FHeight <= 0) or (Length(FWeights) <> FWidth * FHeight) then
+  begin
+    ErrorText := 'MAP_NOT_READY';
+    Exit;
+  end;
+  SourceBytes := Source;
+  DestinationBytes := Destination;
+  FoldStrength := EnsureRange(FoldStrength, 0.0, 2.0);
+  LightingStrength := EnsureRange(LightingStrength, 0.0, 2.0);
+  BacksideStrength := EnsureRange(BacksideStrength, 0.0, 1.0);
+  InfluenceRadius := EnsureRange(InfluenceRadius, 0.05, 1.0);
+  CastShadowStrength := EnsureRange(CastShadowStrength, 0.0, 1.0);
+  RippleStrength := EnsureRange(RippleStrength, 0.0,
+    Max(FWidth, FHeight) * 2.0);
+  RippleCount := EnsureRange(RippleCount, 1.0, 10.0);
+  RippleDirectionRadians := DegToRad(RippleDirectionDegrees);
+  RippleDirectionCosine := Cos(RippleDirectionRadians);
+  RippleDirectionSine := Sin(RippleDirectionRadians);
+  Move(SourceBytes^, DestinationBytes^, NativeInt(FWidth) * FHeight * 4);
+  RadiusSquared := Sqr(Max(FWidth, FHeight) * InfluenceRadius);
+  ShadowRadius := Max(1.0, Max(FWidth, FHeight) * GRIP_CAST_SHADOW_RADIUS);
+  if FullFrameMode then
+  begin
+    XStart := 0;
+    YStart := 0;
+    XEnd := FWidth - 1;
+    YEnd := FHeight - 1;
+  end
+  else
+  begin
+    XStart := FActiveLeft;
+    YStart := FActiveTop;
+    XEnd := FActiveRight;
+    YEnd := FActiveBottom;
+  end;
+  for Y := YStart to YEnd do
+    for X := XStart to XEnd do
+    begin
+      if FullFrameMode then
+        MaskWeight := 1
+      else
+        MaskWeight := Sqr(FWeights[(FHeight - 1 - Y) * FWidth + X]);
+      if MaskWeight <= 0 then
+        Continue;
+      TotalWeight := 0;
+      WeightedDX := 0;
+      WeightedDY := 0;
+      WeightedForeshortening := 0;
+      WeightedForeshorteningX := 0;
+      WeightedForeshorteningY := 0;
+      Influence := 0;
+      for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+      begin
+        if not Enabled[GripIndex] then
+          Continue;
+        DistanceSquared := DistanceSquaredToGripPath(GripIndex, X, Y,
+          PathOffsetX, PathOffsetY);
+        GripWeight := Exp(-2 * DistanceSquared / RadiusSquared);
+        GripDX := (TargetPositions[GripIndex].X -
+          OriginalPositions[GripIndex].X) * Max(1, FWidth - 1);
+        GripDY := (TargetPositions[GripIndex].Y -
+          OriginalPositions[GripIndex].Y) * Max(1, FHeight - 1);
+        GripForeshortening := Min(GRIP_MAX_FORESHORTENING,
+          Sqrt(GripDX * GripDX + GripDY * GripDY) /
+          Max(FWidth, FHeight) * GRIP_FORESHORTENING_GAIN) * FoldStrength;
+        TotalWeight := TotalWeight + GripWeight;
+        WeightedDX := WeightedDX + GripDX * GripWeight;
+        WeightedDY := WeightedDY + GripDY * GripWeight;
+        WeightedForeshortening := WeightedForeshortening +
+          GripForeshortening * GripWeight;
+        WeightedForeshorteningX := WeightedForeshorteningX +
+          PathOffsetX * GripForeshortening * GripWeight;
+        WeightedForeshorteningY := WeightedForeshorteningY +
+          PathOffsetY * GripForeshortening * GripWeight;
+        Influence := Max(Influence, GripWeight);
+      end;
+      if TotalWeight <= 1.0E-9 then
+      begin
+        if RippleStrength <= 0 then
+          Continue;
+        { A travelling surface wave is independent of the grip falloff. }
+        TotalWeight := 1;
+        DX := 0;
+        DY := 0;
+        FoldShade := 1;
+        LiftLight := 1;
+      end
+      else
+      begin
+        DX := WeightedDX / TotalWeight * Influence * MaskWeight;
+        DY := WeightedDY / TotalWeight * Influence * MaskWeight;
+        FoldBand := 4 * Influence * (1 - Influence);
+        FoldShade := 1 - WeightedForeshortening / TotalWeight *
+          GRIP_FOLD_SHADOW_GAIN * FoldBand * MaskWeight * LightingStrength;
+        LiftLight := 1 + WeightedForeshortening / TotalWeight *
+          GRIP_LIFT_LIGHT_GAIN * Sqr(Influence) * MaskWeight *
+          LightingStrength;
+      end;
+      if RippleStrength > 0 then
+      begin
+        RippleCoordinate := (X * RippleDirectionCosine +
+          Y * RippleDirectionSine) / Max(FWidth, FHeight);
+        Ripple := Sin(RippleCoordinate * 2 * Pi * RippleCount -
+          RipplePhase) * RippleStrength * MaskWeight;
+        DX := DX - RippleDirectionSine * Ripple;
+        DY := DY + RippleDirectionCosine * Ripple;
+      end;
+      SampleX := X - DX + WeightedForeshorteningX / TotalWeight *
+        Influence * MaskWeight;
+      SampleY := Y - DY + WeightedForeshorteningY / TotalWeight *
+        Influence * MaskWeight;
+      DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
+      if FullFrameMode and ((SampleX < 0) or (SampleX > FWidth - 1) or
+        (SampleY < 0) or (SampleY > FHeight - 1)) then
+      begin
+        OutsideDistance := Max(Max(-SampleX, SampleX - (FWidth - 1)),
+          Max(-SampleY, SampleY - (FHeight - 1)));
+        ShadowAlpha := EnsureRange(Round(255 * CastShadowStrength *
+          Exp(-OutsideDistance / ShadowRadius)), 0, 255);
+        for Channel := 0 to 2 do
+          DestinationBytes^[DestinationOffset + Channel] := 0;
+        DestinationBytes^[DestinationOffset + 3] := ShadowAlpha;
+        Continue;
+      end;
+      SampleX := EnsureRange(SampleX, 0.0, FWidth - 1.0);
+      SampleY := EnsureRange(SampleY, 0.0, FHeight - 1.0);
+      X0 := Trunc(SampleX);
+      Y0 := Trunc(SampleY);
+      X1 := Min(X0 + 1, FWidth - 1);
+      Y1 := Min(Y0 + 1, FHeight - 1);
+      FX := SampleX - X0;
+      FY := SampleY - Y0;
+      PixelOffset00 := (NativeInt(Y0) * FWidth + X0) * 4;
+      PixelOffset01 := (NativeInt(Y0) * FWidth + X1) * 4;
+      PixelOffset10 := (NativeInt(Y1) * FWidth + X0) * 4;
+      PixelOffset11 := (NativeInt(Y1) * FWidth + X1) * 4;
+      for Channel := 0 to 3 do
+      begin
+        Value := (SourceBytes^[PixelOffset00 + Channel] * (1 - FX) +
+          SourceBytes^[PixelOffset01 + Channel] * FX) * (1 - FY) +
+          (SourceBytes^[PixelOffset10 + Channel] * (1 - FX) +
+          SourceBytes^[PixelOffset11 + Channel] * FX) * FY;
+        SampledChannels[Channel] := Value;
+      end;
+      BacksideGray := (SampledChannels[0] + SampledChannels[1] +
+        SampledChannels[2]) / 3;
+      BacksideWeight := EnsureRange(WeightedForeshortening / TotalWeight /
+        GRIP_MAX_FORESHORTENING * Sqr(Influence) * MaskWeight *
+        BacksideStrength, 0.0, 1.0);
+      for Channel := 0 to 3 do
+      begin
+        Value := SampledChannels[Channel];
+        if Channel < 3 then
+        begin
+          Value := Value * (1 - GRIP_BACKSIDE_DESATURATION *
+            BacksideWeight) + BacksideGray * GRIP_BACKSIDE_DESATURATION *
+            BacksideWeight;
+          Value := Value * FoldShade * LiftLight *
+            (1 - GRIP_BACKSIDE_DARKENING * BacksideWeight);
+        end;
+        DestinationBytes^[DestinationOffset + Channel] :=
+          EnsureRange(Round(Value), 0, 255);
+      end;
+    end;
   Result := True;
 end;
 

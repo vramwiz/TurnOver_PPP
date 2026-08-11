@@ -40,6 +40,7 @@ type
 
 const
   SHAKE_CURVE_SET_COUNT = 2;
+  SHAKE_GRIP_POINT_COUNT = 2;
 
 type
   TShakeCurveSet = record
@@ -47,6 +48,12 @@ type
     CenterContour: TShakeCurve;
   end;
   TShakeCurveSets = array[0..SHAKE_CURVE_SET_COUNT - 1] of TShakeCurveSet;
+  TShakeGripPointVertexIndices =
+    array[0..SHAKE_GRIP_POINT_COUNT - 1] of Integer;
+  TShakeGripVertexIndices = array[0..SHAKE_CURVE_SET_COUNT - 1] of
+    TShakeGripPointVertexIndices;
+  TShakeGripEnabled = array[0..SHAKE_GRIP_POINT_COUNT - 1] of Boolean;
+  TShakeGripPositions = array[0..SHAKE_GRIP_POINT_COUNT - 1] of TPointF;
 
 implementation
 

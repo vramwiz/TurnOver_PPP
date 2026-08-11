@@ -11,8 +11,9 @@ __recovery/
 *.tds
 *.dsk
 *.auf2
+.DS_Store
 Win32/
 Win64/
 /Setup/*.zip
-/Setup/Shake_PPP/
+/Setup/TurnOver_PPP/
 

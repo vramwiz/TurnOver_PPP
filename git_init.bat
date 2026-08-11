@@ -14,16 +14,22 @@ echo === Git ‰Šú‰»ŠJn ===
 if not exist ".gitignore" (
     echo *.~* > .gitignore
     echo __history/ >> .gitignore
+    echo __recovery/ >> .gitignore
     echo *.dcu >> .gitignore
     echo *.local >> .gitignore
     echo *.identcache >> .gitignore
     echo *.exe >> .gitignore
-    echo *.bat >> .gitignore
     echo *.dll >> .gitignore
+    echo *.rsm >> .gitignore
     echo *.map >> .gitignore
     echo *.tds >> .gitignore
     echo *.dsk >> .gitignore
+    echo *.auf2 >> .gitignore
     echo .DS_Store >> .gitignore
+    echo Win32/ >> .gitignore
+    echo Win64/ >> .gitignore
+    echo /Setup/*.zip >> .gitignore
+    echo /Setup/%REPO_NAME%/ >> .gitignore
     echo .gitignore ‚ğ©“®¶¬‚µ‚Ü‚µ‚½B
 )
 
