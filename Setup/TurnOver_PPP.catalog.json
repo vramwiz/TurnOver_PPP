@@ -1,12 +1,12 @@
 [
   {
-    "id": "VRAMWIZ.Shake_PPP",
-    "name": "胸揺れ",
+    "id": "VRAMWIZ.TurnOver_PPP",
+    "name": "布をめくる",
     "type": "フィルタプラグイン",
-    "summary": "画像の一部分をオブジェクト移動に合わせて柔らかく揺らすフィルター",
-    "description": "https://raw.githubusercontent.com/vramwiz/Shake_PPP/main/README.md",
+    "summary": "布の範囲を2点でつまみ、めくり・風揺れ・波打ちを加えるフィルター",
+    "description": "https://raw.githubusercontent.com/vramwiz/TurnOver_PPP/main/README.md",
     "author": "VRAMの魔術師",
-    "repoURL": "https://github.com/vramwiz/Shake_PPP",
+    "repoURL": "https://github.com/vramwiz/TurnOver_PPP",
     "licenses": [
       {
         "type": "不明",
@@ -16,9 +16,10 @@
       }
     ],
     "tags": [
+      "布",
+      "めくり",
       "揺れ",
-      "変形",
-      "ベジェ曲線"
+      "変形"
     ],
     "dependencies": [],
     "images": [],
@@ -29,9 +30,9 @@
         "GoogleDrive": null,
         "github": {
           "owner": "vramwiz",
-          "repo": "Shake_PPP",
-          "pattern": "^Shake_PPP\\.zip$"
-      }
+          "repo": "TurnOver_PPP",
+          "pattern": "^TurnOver_PPP\\.zip$"
+        }
       },
       "install": [
         {
@@ -42,14 +43,14 @@
         },
         {
           "action": "copy",
-          "from": "{tmp}/Shake_PPP",
-          "to": "{pluginsDir}/Shake_PPP"
+          "from": "{tmp}/TurnOver_PPP",
+          "to": "{pluginsDir}/TurnOver_PPP"
         }
       ],
       "uninstall": [
         {
           "action": "delete",
-          "path": "{pluginsDir}/Shake_PPP"
+          "path": "{pluginsDir}/TurnOver_PPP"
         }
       ]
     },
