@@ -15,6 +15,7 @@ type
     FActiveLeft: Integer;
     FActiveRight: Integer;
     FActiveTop: Integer;
+    FCoverage: TArray<Single>;
     FHeight: Integer;
     FLastTimingLog: UInt64;
     FWeights: TArray<Single>;
@@ -43,6 +44,9 @@ type
     function ApplyVariableOuterRgba(Source, Destination: Pointer;
       DisplacementX, DisplacementY: Double;
       out ErrorText: string): Boolean;
+{$IFDEF DEBUG}
+    procedure SaveDebugCoverageBitmap(const FileName: string);
+{$ENDIF}
     property Height: Integer read FHeight;
     property Width: Integer read FWidth;
   end;
@@ -82,6 +86,7 @@ const
   GRIP_WEIGHT_LUT_SIZE = 4096;
   GRIP_WEIGHT_MAX_DISTANCE_RATIO = 8.0;
   MASK_GRID_SIZE = 4;
+  PARTIAL_SELECTION_MARGIN_RATIO = 0.0064;
   VARIABLE_OUTER_MOTION_RATIO = 0.35;
 
 type
@@ -372,6 +377,7 @@ end;
 
 procedure TShakeDeformationMap.Clear;
 begin
+  FCoverage := nil;
   FWeights := nil;
   FWidth := 0;
   FHeight := 0;
@@ -388,14 +394,20 @@ function TShakeDeformationMap.Build(Width, Height: Integer;
 var
   Aspect: Double;
   CenterPolygon: TArray<TPointF>;
+  ExpandedCoverage: TArray<Single>;
   GridHeight: Integer;
   GridWidth: Integer;
   GridX: Integer;
   GridY: Integer;
+  InsideOuter: Boolean;
   Mask: TDoubleArray;
   NormalizedX: Double;
   NormalizedY: Double;
   OuterPolygon: TArray<TPointF>;
+  SelectionMarginPixels: Integer;
+  WindowAddIndex: Integer;
+  WindowCount: Integer;
+  WindowRemoveIndex: Integer;
   AffectedBottom: Integer;
   AffectedLeft: Integer;
   AffectedRight: Integer;
@@ -432,6 +444,8 @@ begin
   else
     CenterPolygon := nil;
   Aspect := Width / Height;
+  SelectionMarginPixels := EnsureRange(Round(
+    Max(Width, Height) * PARTIAL_SELECTION_MARGIN_RATIO), 2, 12);
   GridWidth := (Width + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
   GridHeight := (Height + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
   SetLength(Mask, GridWidth * GridHeight);
@@ -463,20 +477,70 @@ begin
           Max(1, Height - 1), Aspect);
   FWidth := Width;
   FHeight := Height;
+  SetLength(FCoverage, FWidth * FHeight);
   SetLength(FWeights, FWidth * FHeight);
   for Y := 0 to FHeight - 1 do
     for X := 0 to FWidth - 1 do
     begin
       Weight := InterpolatedMask(Mask, GridWidth, GridHeight, X, Y);
-      if Weight > 0 then
-      begin
-        NormalizedX := X / Max(1, FWidth - 1);
-        NormalizedY := 1 - Y / Max(1, FHeight - 1);
-        if not PointInPolygon(OuterPolygon, NormalizedX, NormalizedY) then
-          Weight := 0;
-      end;
+      NormalizedX := X / Max(1, FWidth - 1);
+      NormalizedY := 1 - Y / Max(1, FHeight - 1);
+      InsideOuter := PointInPolygon(OuterPolygon, NormalizedX, NormalizedY);
+      if not InsideOuter then
+        Weight := 0;
+      FCoverage[Y * FWidth + X] := Ord(InsideOuter);
       FWeights[Y * FWidth + X] := Weight;
-      if Weight > 0 then
+    end;
+  if not IsFullFrameClothRange(OuterContour) then
+  begin
+    { A separable binary dilation includes outlines and antialiasing just
+      outside the hand-drawn contour without repeating polygon-distance work
+      for every nearby pixel. }
+    SetLength(ExpandedCoverage, FWidth * FHeight);
+    for Y := 0 to FHeight - 1 do
+    begin
+      WindowCount := 0;
+      for WindowAddIndex := 0 to Min(SelectionMarginPixels,
+        FWidth - 1) do
+        if FCoverage[Y * FWidth + WindowAddIndex] > 0 then
+          Inc(WindowCount);
+      for X := 0 to FWidth - 1 do
+      begin
+        ExpandedCoverage[Y * FWidth + X] := Ord(WindowCount > 0);
+        WindowRemoveIndex := X - SelectionMarginPixels;
+        if (WindowRemoveIndex >= 0) and
+          (FCoverage[Y * FWidth + WindowRemoveIndex] > 0) then
+          Dec(WindowCount);
+        WindowAddIndex := X + SelectionMarginPixels + 1;
+        if (WindowAddIndex < FWidth) and
+          (FCoverage[Y * FWidth + WindowAddIndex] > 0) then
+          Inc(WindowCount);
+      end;
+    end;
+    for X := 0 to FWidth - 1 do
+    begin
+      WindowCount := 0;
+      for WindowAddIndex := 0 to Min(SelectionMarginPixels,
+        FHeight - 1) do
+        if ExpandedCoverage[WindowAddIndex * FWidth + X] > 0 then
+          Inc(WindowCount);
+      for Y := 0 to FHeight - 1 do
+      begin
+        FCoverage[Y * FWidth + X] := Ord(WindowCount > 0);
+        WindowRemoveIndex := Y - SelectionMarginPixels;
+        if (WindowRemoveIndex >= 0) and
+          (ExpandedCoverage[WindowRemoveIndex * FWidth + X] > 0) then
+          Dec(WindowCount);
+        WindowAddIndex := Y + SelectionMarginPixels + 1;
+        if (WindowAddIndex < FHeight) and
+          (ExpandedCoverage[WindowAddIndex * FWidth + X] > 0) then
+          Inc(WindowCount);
+      end;
+    end;
+  end;
+  for Y := 0 to FHeight - 1 do
+    for X := 0 to FWidth - 1 do
+      if FCoverage[Y * FWidth + X] > 0 then
       begin
         ScreenY := FHeight - 1 - Y;
         AffectedLeft := Min(AffectedLeft, X);
@@ -487,7 +551,6 @@ begin
         Inc(AffectedCount);
 {$ENDIF}
       end;
-    end;
   FActiveLeft := AffectedLeft;
   FActiveTop := AffectedTop;
   FActiveRight := AffectedRight;
@@ -643,6 +706,9 @@ var
   PathOffsetY: Double;
   PixelOffset0: Integer;
   PixelOffset1: Integer;
+  PreviewByteCount: NativeInt;
+  PreviewDestinationRgba: TBytes;
+  PreviewSourceRgba: TBytes;
   RadiusSquared: Double;
   Row0: PByteRow;
   Row1: PByteRow;
@@ -712,6 +778,27 @@ begin
   Source.PixelFormat := pf32bit;
   Destination.PixelFormat := pf32bit;
   Destination.SetSize(Source.Width, Source.Height);
+  if not FullFrameMode then
+  begin
+    PreviewByteCount := NativeInt(Source.Width) * Source.Height * 4;
+    SetLength(PreviewSourceRgba, PreviewByteCount);
+    SetLength(PreviewDestinationRgba, PreviewByteCount);
+    for Y := 0 to Source.Height - 1 do
+      Move(Source.ScanLine[Source.Height - 1 - Y]^,
+        PreviewSourceRgba[NativeInt(Y) * Source.Width * 4],
+        NativeInt(Source.Width) * 4);
+    Result := ApplyGripRgba(@PreviewSourceRgba[0],
+      @PreviewDestinationRgba[0], OriginalPositions, TargetPositions,
+      Enabled, 1.0, 1.0, GRIP_PREVIEW_BACKSIDE_STRENGTH, 0.38,
+      GRIP_PREVIEW_CAST_SHADOW_STRENGTH, 0.0, 2.0, 0.0, 0.0,
+      False, ErrorText);
+    if Result then
+      for Y := 0 to Destination.Height - 1 do
+        Move(PreviewDestinationRgba[NativeInt(Y) * Destination.Width * 4],
+          Destination.ScanLine[Destination.Height - 1 - Y]^,
+          NativeInt(Destination.Width) * 4);
+    Exit;
+  end;
   SetLength(SourceRows, Source.Height);
   SetLength(DestinationRows, Destination.Height);
   for Y := 0 to Source.Height - 1 do
@@ -763,10 +850,10 @@ begin
         GripWeight := Exp(-2 * DistanceSquared / RadiusSquared);
         GripDX := (TargetPositions[GripIndex].X -
           OriginalPositions[GripIndex].X) * Max(1, FWidth - 1);
-        { Normalized editor Y grows downward, while the TBitmap sampling rows
-          used by this preview grow in the opposite direction. }
-        GripDY := (OriginalPositions[GripIndex].Y -
-          TargetPositions[GripIndex].Y) * Max(1, FHeight - 1);
+        { SourceRows and DestinationRows are indexed top-to-bottom, matching
+          normalized editor coordinates and the AviUtl2 RGBA path. }
+        GripDY := (TargetPositions[GripIndex].Y -
+          OriginalPositions[GripIndex].Y) * Max(1, FHeight - 1);
         GripForeshortening := Min(GRIP_MAX_FORESHORTENING,
           Sqrt(GripDX * GripDX + GripDY * GripDY) /
           Max(FWidth, FHeight) * GRIP_FORESHORTENING_GAIN);
@@ -946,8 +1033,11 @@ type
   PRgbaBytes = ^TRgbaBytes;
   TRgbaBytes = array[0..268435455] of Byte;
 var
+  AverageGripDX: Double;
+  AverageGripDY: Double;
   DestinationBytes: PRgbaBytes;
   DistanceSquared: Double;
+  EnabledGripCount: Integer;
   GripDX: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
   GripDY: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
   GripForeshortening: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
@@ -958,10 +1048,29 @@ var
     array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
   GripPathX: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
   GripPathY: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  PartialAxisLengthSquared: Double;
+  PartialAxisX: Double;
+  PartialAxisY: Double;
+  PartialBX: Double;
+  PartialBY: Double;
+  PartialDeterminant: Double;
+  PartialFirstGrip: Integer;
+  PartialInverse11: Double;
+  PartialInverse12: Double;
+  PartialInverse21: Double;
+  PartialInverse22: Double;
+  PartialM11: Double;
+  PartialM12: Double;
+  PartialM21: Double;
+  PartialM22: Double;
+  PartialOriginProjection: Double;
+  PartialSecondGrip: Integer;
   ImageHeightScale: Double;
   ImageMaximumDimension: Double;
   ImageWidthScale: Double;
   InverseRadiusSquared: Double;
+  MaximumGripMotion: Double;
+  MotionMargin: Integer;
   RippleAngularScale: Double;
   RippleDirectionCosine: Double;
   RippleDirectionRadians: Double;
@@ -979,7 +1088,8 @@ begin
   Result := False;
   ErrorText := '';
   if (Source = nil) or (Destination = nil) or (FWidth <= 0) or
-    (FHeight <= 0) or (Length(FWeights) <> FWidth * FHeight) then
+    (FHeight <= 0) or (Length(FWeights) <> FWidth * FHeight) or
+    (Length(FCoverage) <> FWidth * FHeight) then
   begin
     ErrorText := 'MAP_NOT_READY';
     Exit;
@@ -1007,6 +1117,10 @@ begin
     Sqr(ImageMaximumDimension * InfluenceRadius);
   ShadowRadius := Max(1.0,
     ImageMaximumDimension * GRIP_CAST_SHADOW_RADIUS);
+  AverageGripDX := 0;
+  AverageGripDY := 0;
+  EnabledGripCount := 0;
+  MaximumGripMotion := 0;
   for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
     if Enabled[GripIndex] then
     begin
@@ -1020,6 +1134,9 @@ begin
         OriginalPositions[GripIndex].Y) * ImageHeightScale;
       GripDX[GripIndex] := GripPathX[GripIndex];
       GripDY[GripIndex] := GripPathY[GripIndex];
+      AverageGripDX := AverageGripDX + GripDX[GripIndex];
+      AverageGripDY := AverageGripDY + GripDY[GripIndex];
+      Inc(EnabledGripCount);
       DistanceSquared := Sqr(GripPathX[GripIndex]) +
         Sqr(GripPathY[GripIndex]);
       if DistanceSquared > 1.0E-9 then
@@ -1029,9 +1146,113 @@ begin
       GripForeshortening[GripIndex] := Min(GRIP_MAX_FORESHORTENING,
         Sqrt(DistanceSquared) / ImageMaximumDimension *
         GRIP_FORESHORTENING_GAIN) * FoldStrength;
+      MaximumGripMotion := Max(MaximumGripMotion,
+        Max(Abs(GripDX[GripIndex]), Abs(GripDY[GripIndex])));
     end;
+  if EnabledGripCount > 0 then
+  begin
+    AverageGripDX := AverageGripDX / EnabledGripCount;
+    AverageGripDY := AverageGripDY / EnabledGripCount;
+  end;
+  { The partial-selection path is one continuous movable layer.  Build the
+    exact inverse of the affine field that maps grip 1 to its target and grip
+    2 to its target.  This avoids the gaps and duplicated source strips caused
+    by evaluating a nonlinear displacement only at the destination pixel. }
+  PartialInverse11 := 1;
+  PartialInverse12 := 0;
+  PartialInverse21 := 0;
+  PartialInverse22 := 1;
+  PartialBX := AverageGripDX;
+  PartialBY := AverageGripDY;
+  PartialFirstGrip := -1;
+  PartialSecondGrip := -1;
+  for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+    if Enabled[GripIndex] then
+      if PartialFirstGrip < 0 then
+        PartialFirstGrip := GripIndex
+      else if PartialSecondGrip < 0 then
+        PartialSecondGrip := GripIndex;
+  if PartialFirstGrip >= 0 then
+  begin
+    PartialBX := GripDX[PartialFirstGrip];
+    PartialBY := GripDY[PartialFirstGrip];
+  end;
+  if PartialSecondGrip >= 0 then
+  begin
+    PartialAxisX := GripOriginX[PartialSecondGrip] -
+      GripOriginX[PartialFirstGrip];
+    PartialAxisY := GripOriginY[PartialSecondGrip] -
+      GripOriginY[PartialFirstGrip];
+    PartialAxisLengthSquared := Sqr(PartialAxisX) + Sqr(PartialAxisY);
+    if PartialAxisLengthSquared > 1.0E-9 then
+    begin
+      PartialM11 := 1 + (GripDX[PartialSecondGrip] -
+        GripDX[PartialFirstGrip]) * PartialAxisX /
+        PartialAxisLengthSquared;
+      PartialM12 := (GripDX[PartialSecondGrip] -
+        GripDX[PartialFirstGrip]) * PartialAxisY /
+        PartialAxisLengthSquared;
+      PartialM21 := (GripDY[PartialSecondGrip] -
+        GripDY[PartialFirstGrip]) * PartialAxisX /
+        PartialAxisLengthSquared;
+      PartialM22 := 1 + (GripDY[PartialSecondGrip] -
+        GripDY[PartialFirstGrip]) * PartialAxisY /
+        PartialAxisLengthSquared;
+      PartialOriginProjection :=
+        (GripOriginX[PartialFirstGrip] * PartialAxisX +
+        GripOriginY[PartialFirstGrip] * PartialAxisY) /
+        PartialAxisLengthSquared;
+      PartialBX := GripDX[PartialFirstGrip] -
+        (GripDX[PartialSecondGrip] - GripDX[PartialFirstGrip]) *
+        PartialOriginProjection;
+      PartialBY := GripDY[PartialFirstGrip] -
+        (GripDY[PartialSecondGrip] - GripDY[PartialFirstGrip]) *
+        PartialOriginProjection;
+      PartialDeterminant := PartialM11 * PartialM22 -
+        PartialM12 * PartialM21;
+      if Abs(PartialDeterminant) > 1.0E-9 then
+      begin
+        PartialInverse11 := PartialM22 / PartialDeterminant;
+        PartialInverse12 := -PartialM12 / PartialDeterminant;
+        PartialInverse21 := -PartialM21 / PartialDeterminant;
+        PartialInverse22 := PartialM11 / PartialDeterminant;
+      end
+      else
+      begin
+        PartialInverse11 := 1;
+        PartialInverse12 := 0;
+        PartialInverse21 := 0;
+        PartialInverse22 := 1;
+        PartialBX := AverageGripDX;
+        PartialBY := AverageGripDY;
+      end;
+    end;
+  end;
   if not FullFrameMode then
+  begin
     Move(SourceBytes^, DestinationBytes^, NativeInt(FWidth) * FHeight * 4);
+    { Remove the original selected layer.  Pixels outside the saved contour
+      remain byte-for-byte unchanged; the moved selection is composited over
+      them below. }
+    TParallel.&For(FActiveTop, FActiveBottom,
+      procedure(Y: Integer)
+      var
+        Coverage: Double;
+        DestinationOffset: NativeInt;
+        LocalX: Integer;
+      begin
+        for LocalX := FActiveLeft to FActiveRight do
+        begin
+          Coverage := FCoverage[(FHeight - 1 - Y) * FWidth + LocalX];
+          if Coverage <= 0 then
+            Continue;
+          DestinationOffset := (NativeInt(Y) * FWidth + LocalX) * 4;
+          DestinationBytes^[DestinationOffset + 3] := EnsureRange(Round(
+            DestinationBytes^[DestinationOffset + 3] * (1 - Coverage)),
+            0, 255);
+        end;
+      end);
+  end;
   if FullFrameMode then
   begin
     XStart := 0;
@@ -1041,10 +1262,11 @@ begin
   end
   else
   begin
-    XStart := FActiveLeft;
-    YStart := FActiveTop;
-    XEnd := FActiveRight;
-    YEnd := FActiveBottom;
+    MotionMargin := Ceil(MaximumGripMotion + Abs(RippleStrength));
+    XStart := Max(0, FActiveLeft - MotionMargin);
+    YStart := Max(0, FActiveTop - MotionMargin);
+    XEnd := Min(FWidth - 1, FActiveRight + MotionMargin);
+    YEnd := Min(FHeight - 1, FActiveBottom + MotionMargin);
   end;
   TParallel.&For(YStart, YEnd,
     procedure(Y: Integer)
@@ -1064,6 +1286,12 @@ begin
       GripWeight: Double;
       Influence: Double;
       LiftLight: Double;
+      MapFX: Double;
+      MapFY: Double;
+      MapX0: Integer;
+      MapX1: Integer;
+      MapY0: Integer;
+      MapY1: Integer;
       MaskWeight: Double;
       NextRippleCosine: Double;
       NextRippleSine: Double;
@@ -1089,6 +1317,10 @@ begin
       WeightedForeshortening: Double;
       WeightedForeshorteningX: Double;
       WeightedForeshorteningY: Double;
+      Weight00: Double;
+      Weight01: Double;
+      Weight10: Double;
+      Weight11: Double;
       X: Integer;
       X0: Integer;
       X1: Integer;
@@ -1117,9 +1349,7 @@ begin
       if FullFrameMode then
         MaskWeight := 1
       else
-        MaskWeight := Sqr(FWeights[(FHeight - 1 - Y) * FWidth + X]);
-      if MaskWeight <= 0 then
-        Continue;
+        MaskWeight := 1;
       TotalWeight := 0;
       WeightedDX := 0;
       WeightedDY := 0;
@@ -1167,20 +1397,41 @@ begin
             DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
             PCardinal(@DestinationBytes^[DestinationOffset])^ :=
               PCardinal(@SourceBytes^[DestinationOffset])^;
+            Continue;
           end;
-          Continue;
         end;
-        { A travelling surface wave is independent of the grip falloff. }
+        { A partial selection represents one movable layer.  Even beyond the
+          grip falloff it must follow the grips instead of being redrawn at
+          its original position. }
         TotalWeight := 1;
-        DX := 0;
-        DY := 0;
+        if FullFrameMode then
+        begin
+          DX := 0;
+          DY := 0;
+        end
+        else
+        begin
+          DX := AverageGripDX;
+          DY := AverageGripDY;
+        end;
         FoldShade := 1;
         LiftLight := 1;
       end
       else
       begin
-        DX := WeightedDX / TotalWeight * Influence * MaskWeight;
-        DY := WeightedDY / TotalWeight * Influence * MaskWeight;
+        if FullFrameMode then
+        begin
+          DX := WeightedDX / TotalWeight * Influence * MaskWeight;
+          DY := WeightedDY / TotalWeight * Influence * MaskWeight;
+        end
+        else
+        begin
+          { Normalize the grip blend across the complete selected layer.
+            Influence still controls folding and lighting, but must not leave
+            distant selected pixels behind at the source position. }
+          DX := WeightedDX / TotalWeight;
+          DY := WeightedDY / TotalWeight;
+        end;
         FoldBand := 4 * Influence * (1 - Influence);
         FoldShade := 1 - WeightedForeshortening / TotalWeight *
           GRIP_FOLD_SHADOW_GAIN * FoldBand * MaskWeight * LightingStrength;
@@ -1194,10 +1445,25 @@ begin
         DX := DX - RippleDirectionSine * Ripple;
         DY := DY + RippleDirectionCosine * Ripple;
       end;
-      SampleX := X - DX + WeightedForeshorteningX / TotalWeight *
-        Influence * MaskWeight;
-      SampleY := Y - DY + WeightedForeshorteningY / TotalWeight *
-        Influence * MaskWeight;
+      if FullFrameMode then
+      begin
+        SampleX := X - DX + WeightedForeshorteningX / TotalWeight *
+          Influence * MaskWeight;
+        SampleY := Y - DY + WeightedForeshorteningY / TotalWeight *
+          Influence * MaskWeight;
+      end
+      else
+      begin
+        SampleX := PartialInverse11 * (X - PartialBX) +
+          PartialInverse12 * (Y - PartialBY);
+        SampleY := PartialInverse21 * (X - PartialBX) +
+          PartialInverse22 * (Y - PartialBY);
+        if RippleStrength > 0 then
+        begin
+          SampleX := SampleX + RippleDirectionSine * Ripple;
+          SampleY := SampleY - RippleDirectionCosine * Ripple;
+        end;
+      end;
       DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
       if FullFrameMode and ((SampleX < 0) or (SampleX > FWidth - 1) or
         (SampleY < 0) or (SampleY > FHeight - 1)) then
@@ -1210,6 +1476,29 @@ begin
           DestinationBytes^[DestinationOffset + Channel] := 0;
         DestinationBytes^[DestinationOffset + 3] := ShadowAlpha;
         Continue;
+      end;
+      if not FullFrameMode then
+      begin
+        if (SampleX < 0) or (SampleX > FWidth - 1) or
+          (SampleY < 0) or (SampleY > FHeight - 1) then
+          Continue;
+        MapX0 := Trunc(SampleX);
+        MapY0 := Trunc(SampleY);
+        MapX1 := Min(MapX0 + 1, FWidth - 1);
+        MapY1 := Min(MapY0 + 1, FHeight - 1);
+        MapFX := SampleX - MapX0;
+        MapFY := SampleY - MapY0;
+        Weight00 := FCoverage[(FHeight - 1 - MapY0) * FWidth + MapX0];
+        Weight01 := FCoverage[(FHeight - 1 - MapY0) * FWidth + MapX1];
+        Weight10 := FCoverage[(FHeight - 1 - MapY1) * FWidth + MapX0];
+        Weight11 := FCoverage[(FHeight - 1 - MapY1) * FWidth + MapX1];
+        MaskWeight := Sqr((Weight00 * (1 - MapFX) + Weight01 * MapFX) *
+          (1 - MapFY) + (Weight10 * (1 - MapFX) +
+          Weight11 * MapFX) * MapFY);
+        if MaskWeight <= 0 then
+          Continue;
+        FoldShade := 1 + (FoldShade - 1) * MaskWeight;
+        LiftLight := 1 + (LiftLight - 1) * MaskWeight;
       end;
       SampleX := EnsureRange(SampleX, 0.0, FWidth - 1.0);
       SampleY := EnsureRange(SampleY, 0.0, FHeight - 1.0);
@@ -1247,13 +1536,56 @@ begin
           Value := Value * FoldShade * LiftLight *
             (1 - GRIP_BACKSIDE_DARKENING * BacksideWeight);
         end;
-        DestinationBytes^[DestinationOffset + Channel] :=
-          EnsureRange(Round(Value), 0, 255);
+        if FullFrameMode then
+          DestinationBytes^[DestinationOffset + Channel] :=
+            EnsureRange(Round(Value), 0, 255)
+        else
+          DestinationBytes^[DestinationOffset + Channel] := EnsureRange(
+            Round(DestinationBytes^[DestinationOffset + Channel] *
+            (1 - MaskWeight) + Value * MaskWeight), 0, 255);
       end;
     end;
   end);
   Result := True;
 end;
+
+{$IFDEF DEBUG}
+procedure TShakeDeformationMap.SaveDebugCoverageBitmap(
+  const FileName: string);
+var
+  Bitmap: Vcl.Graphics.TBitmap;
+  Coverage: Byte;
+  Row: PByte;
+  X: Integer;
+  Y: Integer;
+begin
+  if (FWidth <= 0) or (FHeight <= 0) or
+    (Length(FCoverage) <> FWidth * FHeight) then
+    Exit;
+  Bitmap := Vcl.Graphics.TBitmap.Create;
+  try
+    Bitmap.PixelFormat := pf32bit;
+    Bitmap.SetSize(FWidth, FHeight);
+    for Y := 0 to FHeight - 1 do
+    begin
+      Row := Bitmap.ScanLine[FHeight - 1 - Y];
+      for X := 0 to FWidth - 1 do
+      begin
+        Coverage := EnsureRange(Round(FCoverage[
+          (FHeight - 1 - Y) * FWidth + X] * 255), 0, 255);
+        Row[0] := Coverage;
+        Row[1] := Coverage;
+        Row[2] := Coverage;
+        Row[3] := 255;
+        Inc(Row, 4);
+      end;
+    end;
+    Bitmap.SaveToFile(FileName);
+  finally
+    Bitmap.Free;
+  end;
+end;
+{$ENDIF}
 
 function TShakeDeformationMap.ApplyVariableOuterRgba(Source,
   Destination: Pointer; DisplacementX, DisplacementY: Double;

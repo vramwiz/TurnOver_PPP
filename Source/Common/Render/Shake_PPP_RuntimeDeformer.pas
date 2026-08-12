@@ -21,6 +21,7 @@ uses
   System.SysUtils,
   System.Types,
   Winapi.Windows,
+  Vcl.Graphics,
   AviUtl2FilterInfoUtils,
   Shake_PPP_CurveData,
   Shake_PPP_CurveModel,
@@ -36,6 +37,9 @@ type
     FHeight: Integer;
     FMap: TShakeDeformationMap;
     FMapReady: Boolean;
+{$IFDEF DEBUG}
+    FLastDebugDumpFrame: Integer;
+{$ENDIF}
     FOuterContour: TShakeCurve;
     FOutput: TBytes;
     FSource: TBytes;
@@ -61,9 +65,51 @@ begin
   inherited;
   FOuterContour := TShakeCurve.Create;
   FMap := TShakeDeformationMap.Create;
+{$IFDEF DEBUG}
+  FLastDebugDumpFrame := Low(Integer);
+{$ENDIF}
   for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
     FGripVertexIndices[GripIndex] := -1;
 end;
+
+{$IFDEF DEBUG}
+procedure SaveDebugRgbaBitmap(const Pixels: TBytes; Width, Height: Integer;
+  const FileName: string);
+var
+  Alpha: Integer;
+  Bitmap: Vcl.Graphics.TBitmap;
+  Destination: PByte;
+  PixelOffset: NativeInt;
+  X: Integer;
+  Y: Integer;
+begin
+  if (Width <= 0) or (Height <= 0) or
+    (Length(Pixels) <> NativeInt(Width) * Height * 4) then
+    Exit;
+  Bitmap := Vcl.Graphics.TBitmap.Create;
+  try
+    Bitmap.PixelFormat := pf32bit;
+    Bitmap.SetSize(Width, Height);
+    for Y := 0 to Height - 1 do
+    begin
+      Destination := Bitmap.ScanLine[Height - 1 - Y];
+      for X := 0 to Width - 1 do
+      begin
+        PixelOffset := (NativeInt(Y) * Width + X) * 4;
+        Alpha := Pixels[PixelOffset + 3];
+        Destination[0] := Pixels[PixelOffset + 2] * Alpha div 255;
+        Destination[1] := Pixels[PixelOffset + 1] * Alpha div 255;
+        Destination[2] := Pixels[PixelOffset] * Alpha div 255;
+        Destination[3] := 255;
+        Inc(Destination, 4);
+      end;
+    end;
+    Bitmap.SaveToFile(FileName);
+  finally
+    Bitmap.Free;
+  end;
+end;
+{$ENDIF}
 
 destructor TTurnOverObjectState.Destroy;
 begin
@@ -185,6 +231,18 @@ begin
   SetLength(FSource, ByteCount);
   SetLength(FOutput, ByteCount);
   Video^.GetImageData(PPIXEL_RGBA(@FSource[0]));
+{$IFDEF DEBUG}
+  if Frame <> FLastDebugDumpFrame then
+    try
+      SaveDebugRgbaBitmap(FSource, Width, Height,
+        'C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\debug_source.bmp');
+      FMap.SaveDebugCoverageBitmap(
+        'C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\debug_coverage.bmp');
+    except
+      on E: Exception do
+        DebugLog('Runtime source debug image save failed: ' + E.Message);
+    end;
+{$ENDIF}
   if not FMap.ApplyGripRgba(@FSource[0], @FOutput[0], OriginalPositions,
     TargetPositions, Enabled, Settings.FoldStrength,
     Settings.LightingStrength, Settings.BacksideStrength,
@@ -197,6 +255,22 @@ begin
     DebugLog('Runtime turnover deformation failed: ' + ErrorText);
     Exit;
   end;
+{$IFDEF DEBUG}
+  if Frame <> FLastDebugDumpFrame then
+  begin
+    try
+      SaveDebugRgbaBitmap(FOutput, Width, Height,
+        'C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\debug_output.bmp');
+      DebugLog(Format(
+        'Runtime debug images saved: frame=%d source=debug_source.bmp coverage=debug_coverage.bmp output=debug_output.bmp.',
+        [Frame]));
+    except
+      on E: Exception do
+        DebugLog('Runtime output debug image save failed: ' + E.Message);
+    end;
+    FLastDebugDumpFrame := Frame;
+  end;
+{$ENDIF}
   Video^.SetImageData(PPIXEL_RGBA(@FOutput[0]), Width, Height);
 end;
 

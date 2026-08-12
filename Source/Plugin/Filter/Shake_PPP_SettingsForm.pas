@@ -1287,6 +1287,8 @@ begin
   Source := @Pixels[0];
   for Y := 0 to Height - 1 do
   begin
+    { CopyLastFrame exposes rows in the same bottom-to-top order used by
+      TBitmap.ScanLine.  Reversing this index flips the settings preview. }
     Destination := FBackground.ScanLine[Y];
     for X := 0 to Width - 1 do
     begin

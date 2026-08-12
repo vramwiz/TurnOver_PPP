@@ -29,6 +29,12 @@ begin
   Curve.Closed := True;
 end;
 
+procedure Check(Condition: Boolean; const MessageText: string);
+begin
+  if not Condition then
+    raise Exception.Create(MessageText);
+end;
+
 var
   CenterContour: TShakeCurve;
   Checksum: UInt64;
@@ -44,7 +50,10 @@ var
   GripEnabled: TShakeGripEnabled;
   GripOrigins: TShakeGripPositions;
   GripTargets: TShakeGripPositions;
+  HasVacatedPixel: Boolean;
+  MovedBeyondOriginalTop: Boolean;
   OuterContour: TShakeCurve;
+  PixelOffset: NativeInt;
   Row: PByte;
   Source: TBitmap;
   SourceRgba: TBytes;
@@ -111,11 +120,42 @@ begin
       raise Exception.Create(ErrorText);
     SetLength(SourceRgba, NativeInt(Source.Width) * Source.Height * 4);
     SetLength(DestinationRgba, Length(SourceRgba));
+    for Y := 0 to Source.Height - 1 do
+      for X := 0 to Source.Width - 1 do
+      begin
+        PixelOffset := (NativeInt(Y) * Source.Width + X) * 4;
+        SourceRgba[PixelOffset] := Byte(X and $FF);
+        SourceRgba[PixelOffset + 1] := Byte(Y and $FF);
+        SourceRgba[PixelOffset + 2] := Byte((X + Y) and $FF);
+        SourceRgba[PixelOffset + 3] := 255;
+      end;
     if not DeformationMap.ApplyGripRgba(@SourceRgba[0],
       @DestinationRgba[0], GripOrigins, GripTargets, GripEnabled,
       1.0, 1.0, 0.35, 0.38, 0.0, 0.0, 2.0, 0.0, 0.0,
       IsFullFrameClothRange(OuterContour), ErrorText) then
       raise Exception.Create(ErrorText);
+    Check(PCardinal(@DestinationRgba[0])^ = PCardinal(@SourceRgba[0])^,
+      'Partial selection changed a fixed outside pixel.');
+    HasVacatedPixel := False;
+    MovedBeyondOriginalTop := False;
+    for Y := 0 to Source.Height - 1 do
+      for X := 0 to Source.Width - 1 do
+      begin
+        PixelOffset := (NativeInt(Y) * Source.Width + X) * 4;
+        if DestinationRgba[PixelOffset + 3] < 255 then
+          HasVacatedPixel := True;
+        if (Y < 82) and
+          (PCardinal(@DestinationRgba[PixelOffset])^ <>
+           PCardinal(@SourceRgba[PixelOffset])^) then
+          MovedBeyondOriginalTop := True;
+      end;
+    Check(HasVacatedPixel,
+      'Partial selection did not clear its vacated source area.');
+    PixelOffset := (NativeInt(850) * Source.Width + 512) * 4;
+    Check(DestinationRgba[PixelOffset + 3] = 0,
+      'Partial selection left distant cloth at its source position.');
+    Check(MovedBeyondOriginalTop,
+      'Partial selection was clipped to its original bounds.');
     FillChar(SourceRgba[0], Length(SourceRgba), 255);
     FullFrameEnabled[0] := True;
     FullFrameEnabled[1] := False;
