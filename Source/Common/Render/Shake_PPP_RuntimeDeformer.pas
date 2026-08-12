@@ -167,6 +167,7 @@ var
   Wave: Double;
   WindX: Double;
   WindY: Double;
+  TightPartialCoverage: Boolean;
   Width: Integer;
 begin
   if (Video = nil) or (Video^.Object_ = nil) or
@@ -227,6 +228,12 @@ begin
   end;
   if not HasEnabledGrip then
     Exit;
+  TightPartialCoverage :=
+    SameValue(Settings.GripOffsets[0].X, 0, 0.0001) and
+    SameValue(Settings.GripOffsets[0].Y, 0, 0.0001) and
+    SameValue(Settings.GripOffsets[1].X, 0, 0.0001) and
+    SameValue(Settings.GripOffsets[1].Y, 0, 0.0001) and
+    ((Settings.WindStrength > 0) or (Settings.RippleStrength > 0));
   ByteCount := NativeInt(Width) * Height * 4;
   SetLength(FSource, ByteCount);
   SetLength(FOutput, ByteCount);
@@ -237,7 +244,8 @@ begin
       SaveDebugRgbaBitmap(FSource, Width, Height,
         'C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\debug_source.bmp');
       FMap.SaveDebugCoverageBitmap(
-        'C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\debug_coverage.bmp');
+        'C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\debug_coverage.bmp',
+        TightPartialCoverage);
     except
       on E: Exception do
         DebugLog('Runtime source debug image save failed: ' + E.Message);
@@ -250,7 +258,7 @@ begin
     Settings.RippleStrength, Settings.RippleCount,
     2 * Pi * Frame / Max(1.0, Settings.WindPeriod),
     Settings.WindDirectionDegrees,
-    FFullFrameMode, ErrorText) then
+    FFullFrameMode, TightPartialCoverage, ErrorText) then
   begin
     DebugLog('Runtime turnover deformation failed: ' + ErrorText);
     Exit;

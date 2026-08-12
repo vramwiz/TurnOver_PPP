@@ -21,6 +21,7 @@ type
     FFixedTopRight: TPointF;
     FFixedTopValid: Boolean;
     FCoverage: TArray<Single>;
+    FTightCoverage: TArray<Single>;
     FHeight: Integer;
     FLastTimingLog: UInt64;
     FWeights: TArray<Single>;
@@ -41,7 +42,8 @@ type
       const Enabled: TShakeGripEnabled; FoldStrength, LightingStrength,
       BacksideStrength, InfluenceRadius, CastShadowStrength: Double;
       RippleStrength, RippleCount, RipplePhase,
-      RippleDirectionDegrees: Double; FullFrameMode: Boolean;
+      RippleDirectionDegrees: Double; FullFrameMode,
+      TightPartialCoverage: Boolean;
       out ErrorText: string): Boolean;
     function ApplyRgba(Source, Destination: Pointer;
       DisplacementX, DisplacementY: Double;
@@ -50,7 +52,8 @@ type
       DisplacementX, DisplacementY: Double;
       out ErrorText: string): Boolean;
 {$IFDEF DEBUG}
-    procedure SaveDebugCoverageBitmap(const FileName: string);
+    procedure SaveDebugCoverageBitmap(const FileName: string;
+      TightPartialCoverage: Boolean);
 {$ENDIF}
     property Height: Integer read FHeight;
     property Width: Integer read FWidth;
@@ -92,6 +95,7 @@ const
   MASK_GRID_SIZE = 4;
   PARTIAL_FIXED_ANCHOR_RADIUS_RATIO = 0.06;
   PARTIAL_SELECTION_MARGIN_RATIO = 0.0064;
+  PARTIAL_TIGHT_SELECTION_MARGIN_PIXELS = 2;
   VARIABLE_OUTER_MOTION_RATIO = 0.35;
 
 type
@@ -383,6 +387,7 @@ end;
 procedure TShakeDeformationMap.Clear;
 begin
   FCoverage := nil;
+  FTightCoverage := nil;
   FFixedTopBlend := nil;
   FWeights := nil;
   FWidth := 0;
@@ -418,9 +423,6 @@ var
   UpperPathStep: Integer;
   UpperRightIndex: Integer;
   SelectionMarginPixels: Integer;
-  WindowAddIndex: Integer;
-  WindowCount: Integer;
-  WindowRemoveIndex: Integer;
   AffectedBottom: Integer;
   AffectedLeft: Integer;
   AffectedRight: Integer;
@@ -434,6 +436,60 @@ var
   X: Integer;
   Y: Integer;
   Weight: Double;
+
+  procedure DilateCoverage(const SourceCoverage: TArray<Single>;
+    MarginPixels: Integer; out DestinationCoverage: TArray<Single>);
+  var
+    HorizontalCoverage: TArray<Single>;
+    LocalWindowAddIndex: Integer;
+    LocalWindowCount: Integer;
+    LocalWindowRemoveIndex: Integer;
+    LocalX: Integer;
+    LocalY: Integer;
+  begin
+    SetLength(HorizontalCoverage, Width * Height);
+    SetLength(DestinationCoverage, Width * Height);
+    for LocalY := 0 to Height - 1 do
+    begin
+      LocalWindowCount := 0;
+      for LocalWindowAddIndex := 0 to Min(MarginPixels, Width - 1) do
+        if SourceCoverage[LocalY * Width + LocalWindowAddIndex] > 0 then
+          Inc(LocalWindowCount);
+      for LocalX := 0 to Width - 1 do
+      begin
+        HorizontalCoverage[LocalY * Width + LocalX] :=
+          Ord(LocalWindowCount > 0);
+        LocalWindowRemoveIndex := LocalX - MarginPixels;
+        if (LocalWindowRemoveIndex >= 0) and
+          (SourceCoverage[LocalY * Width + LocalWindowRemoveIndex] > 0) then
+          Dec(LocalWindowCount);
+        LocalWindowAddIndex := LocalX + MarginPixels + 1;
+        if (LocalWindowAddIndex < Width) and
+          (SourceCoverage[LocalY * Width + LocalWindowAddIndex] > 0) then
+          Inc(LocalWindowCount);
+      end;
+    end;
+    for LocalX := 0 to Width - 1 do
+    begin
+      LocalWindowCount := 0;
+      for LocalWindowAddIndex := 0 to Min(MarginPixels, Height - 1) do
+        if HorizontalCoverage[LocalWindowAddIndex * Width + LocalX] > 0 then
+          Inc(LocalWindowCount);
+      for LocalY := 0 to Height - 1 do
+      begin
+        DestinationCoverage[LocalY * Width + LocalX] :=
+          Ord(LocalWindowCount > 0);
+        LocalWindowRemoveIndex := LocalY - MarginPixels;
+        if (LocalWindowRemoveIndex >= 0) and
+          (HorizontalCoverage[LocalWindowRemoveIndex * Width + LocalX] > 0) then
+          Dec(LocalWindowCount);
+        LocalWindowAddIndex := LocalY + MarginPixels + 1;
+        if (LocalWindowAddIndex < Height) and
+          (HorizontalCoverage[LocalWindowAddIndex * Width + LocalX] > 0) then
+          Inc(LocalWindowCount);
+      end;
+    end;
+  end;
 
   function FixedTopBlendAt(NormalizedPixelX,
     NormalizedPixelY: Double): Double;
@@ -593,48 +649,13 @@ begin
     { A separable binary dilation includes outlines and antialiasing just
       outside the hand-drawn contour without repeating polygon-distance work
       for every nearby pixel. }
-    SetLength(ExpandedCoverage, FWidth * FHeight);
-    for Y := 0 to FHeight - 1 do
-    begin
-      WindowCount := 0;
-      for WindowAddIndex := 0 to Min(SelectionMarginPixels,
-        FWidth - 1) do
-        if FCoverage[Y * FWidth + WindowAddIndex] > 0 then
-          Inc(WindowCount);
-      for X := 0 to FWidth - 1 do
-      begin
-        ExpandedCoverage[Y * FWidth + X] := Ord(WindowCount > 0);
-        WindowRemoveIndex := X - SelectionMarginPixels;
-        if (WindowRemoveIndex >= 0) and
-          (FCoverage[Y * FWidth + WindowRemoveIndex] > 0) then
-          Dec(WindowCount);
-        WindowAddIndex := X + SelectionMarginPixels + 1;
-        if (WindowAddIndex < FWidth) and
-          (FCoverage[Y * FWidth + WindowAddIndex] > 0) then
-          Inc(WindowCount);
-      end;
-    end;
-    for X := 0 to FWidth - 1 do
-    begin
-      WindowCount := 0;
-      for WindowAddIndex := 0 to Min(SelectionMarginPixels,
-        FHeight - 1) do
-        if ExpandedCoverage[WindowAddIndex * FWidth + X] > 0 then
-          Inc(WindowCount);
-      for Y := 0 to FHeight - 1 do
-      begin
-        FCoverage[Y * FWidth + X] := Ord(WindowCount > 0);
-        WindowRemoveIndex := Y - SelectionMarginPixels;
-        if (WindowRemoveIndex >= 0) and
-          (ExpandedCoverage[WindowRemoveIndex * FWidth + X] > 0) then
-          Dec(WindowCount);
-        WindowAddIndex := Y + SelectionMarginPixels + 1;
-        if (WindowAddIndex < FHeight) and
-          (ExpandedCoverage[WindowAddIndex * FWidth + X] > 0) then
-          Inc(WindowCount);
-      end;
-    end;
+    DilateCoverage(FCoverage, PARTIAL_TIGHT_SELECTION_MARGIN_PIXELS,
+      FTightCoverage);
+    DilateCoverage(FCoverage, SelectionMarginPixels, ExpandedCoverage);
+    FCoverage := ExpandedCoverage;
   end;
+  if Length(FTightCoverage) = 0 then
+    FTightCoverage := FCoverage;
   for Y := 0 to FHeight - 1 do
     for X := 0 to FWidth - 1 do
       if FCoverage[Y * FWidth + X] > 0 then
@@ -888,7 +909,7 @@ begin
       @PreviewDestinationRgba[0], OriginalPositions, TargetPositions,
       Enabled, 1.0, 1.0, GRIP_PREVIEW_BACKSIDE_STRENGTH, 0.38,
       GRIP_PREVIEW_CAST_SHADOW_STRENGTH, 0.0, 2.0, 0.0, 0.0,
-      False, ErrorText);
+      False, False, ErrorText);
     if Result then
       for Y := 0 to Destination.Height - 1 do
         Move(PreviewDestinationRgba[NativeInt(Y) * Destination.Width * 4],
@@ -1124,7 +1145,8 @@ function TShakeDeformationMap.ApplyGripRgba(Source, Destination: Pointer;
   const Enabled: TShakeGripEnabled; FoldStrength, LightingStrength,
   BacksideStrength, InfluenceRadius, CastShadowStrength: Double;
   RippleStrength, RippleCount, RipplePhase,
-  RippleDirectionDegrees: Double; FullFrameMode: Boolean;
+  RippleDirectionDegrees: Double; FullFrameMode,
+  TightPartialCoverage: Boolean;
   out ErrorText: string): Boolean;
 type
   PRgbaBytes = ^TRgbaBytes;
@@ -1187,6 +1209,7 @@ begin
   if (Source = nil) or (Destination = nil) or (FWidth <= 0) or
     (FHeight <= 0) or (Length(FWeights) <> FWidth * FHeight) or
     (Length(FCoverage) <> FWidth * FHeight) or
+    (Length(FTightCoverage) <> FWidth * FHeight) or
     (Length(FFixedTopBlend) <> FWidth * FHeight) then
   begin
     ErrorText := 'MAP_NOT_READY';
@@ -1341,7 +1364,12 @@ begin
       begin
         for LocalX := FActiveLeft to FActiveRight do
         begin
-          Coverage := FCoverage[(FHeight - 1 - Y) * FWidth + LocalX];
+          if TightPartialCoverage then
+            Coverage := FTightCoverage[
+              (FHeight - 1 - Y) * FWidth + LocalX]
+          else
+            Coverage := FCoverage[
+              (FHeight - 1 - Y) * FWidth + LocalX];
           if Coverage <= 0 then
             Continue;
           DestinationOffset := (NativeInt(Y) * FWidth + LocalX) * 4;
@@ -1594,10 +1622,28 @@ begin
         MapY1 := Min(MapY0 + 1, FHeight - 1);
         MapFX := SampleX - MapX0;
         MapFY := SampleY - MapY0;
-        Weight00 := FCoverage[(FHeight - 1 - MapY0) * FWidth + MapX0];
-        Weight01 := FCoverage[(FHeight - 1 - MapY0) * FWidth + MapX1];
-        Weight10 := FCoverage[(FHeight - 1 - MapY1) * FWidth + MapX0];
-        Weight11 := FCoverage[(FHeight - 1 - MapY1) * FWidth + MapX1];
+        if TightPartialCoverage then
+        begin
+          Weight00 := FTightCoverage[
+            (FHeight - 1 - MapY0) * FWidth + MapX0];
+          Weight01 := FTightCoverage[
+            (FHeight - 1 - MapY0) * FWidth + MapX1];
+          Weight10 := FTightCoverage[
+            (FHeight - 1 - MapY1) * FWidth + MapX0];
+          Weight11 := FTightCoverage[
+            (FHeight - 1 - MapY1) * FWidth + MapX1];
+        end
+        else
+        begin
+          Weight00 := FCoverage[
+            (FHeight - 1 - MapY0) * FWidth + MapX0];
+          Weight01 := FCoverage[
+            (FHeight - 1 - MapY0) * FWidth + MapX1];
+          Weight10 := FCoverage[
+            (FHeight - 1 - MapY1) * FWidth + MapX0];
+          Weight11 := FCoverage[
+            (FHeight - 1 - MapY1) * FWidth + MapX1];
+        end;
         MaskWeight := Sqr((Weight00 * (1 - MapFX) + Weight01 * MapFX) *
           (1 - MapFY) + (Weight10 * (1 - MapFX) +
           Weight11 * MapFX) * MapFY);
@@ -1659,7 +1705,7 @@ end;
 
 {$IFDEF DEBUG}
 procedure TShakeDeformationMap.SaveDebugCoverageBitmap(
-  const FileName: string);
+  const FileName: string; TightPartialCoverage: Boolean);
 var
   Bitmap: Vcl.Graphics.TBitmap;
   Coverage: Byte;
@@ -1679,8 +1725,12 @@ begin
       Row := Bitmap.ScanLine[FHeight - 1 - Y];
       for X := 0 to FWidth - 1 do
       begin
-        Coverage := EnsureRange(Round(FCoverage[
-          (FHeight - 1 - Y) * FWidth + X] * 255), 0, 255);
+        if TightPartialCoverage then
+          Coverage := EnsureRange(Round(FTightCoverage[
+            (FHeight - 1 - Y) * FWidth + X] * 255), 0, 255)
+        else
+          Coverage := EnsureRange(Round(FCoverage[
+            (FHeight - 1 - Y) * FWidth + X] * 255), 0, 255);
         Row[0] := Coverage;
         Row[1] := Coverage;
         Row[2] := Coverage;

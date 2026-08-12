@@ -143,7 +143,7 @@ begin
     if not DeformationMap.ApplyGripRgba(@SourceRgba[0],
       @DestinationRgba[0], GripOrigins, GripTargets, GripEnabled,
       1.0, 1.0, 0.35, 0.38, 0.0, 0.0, 2.0, 0.0, 0.0,
-      IsFullFrameClothRange(OuterContour), ErrorText) then
+      IsFullFrameClothRange(OuterContour), False, ErrorText) then
       raise Exception.Create(ErrorText);
     Check(PCardinal(@DestinationRgba[0])^ = PCardinal(@SourceRgba[0])^,
       'Partial selection changed a fixed outside pixel.');
@@ -185,6 +185,21 @@ begin
       'Partial selection left distant cloth at its source position.');
     Check(MovedBeyondOriginalTop,
       'Partial selection was clipped to its original bounds.');
+    GripTargets[0] := PointF(GripOrigins[0].X + 3 / 1023,
+      GripOrigins[0].Y);
+    GripTargets[1] := PointF(GripOrigins[1].X + 3 / 1023,
+      GripOrigins[1].Y);
+    if not DeformationMap.ApplyGripRgba(@SourceRgba[0],
+      @DestinationRgba[0], GripOrigins, GripTargets, GripEnabled,
+      1.0, 1.0, 0.35, 0.38, 0.0, 0.0, 2.0, 0.0, 0.0,
+      False, True, ErrorText) then
+      raise Exception.Create(ErrorText);
+    PixelOffset := (NativeInt(512) * Source.Width + 76) * 4;
+    Check(PCardinal(@DestinationRgba[PixelOffset])^ =
+      PCardinal(@SourceRgba[PixelOffset])^,
+      'Tight shake selection changed a neighboring outside pixel.');
+    GripTargets[0] := PointF(0.28, 0.35);
+    GripTargets[1] := PointF(0.72, 0.3);
     FillChar(SourceRgba[0], Length(SourceRgba), 255);
     FullFrameEnabled[0] := True;
     FullFrameEnabled[1] := False;
@@ -196,7 +211,7 @@ begin
       @DestinationRgba[0], FullFrameOrigins, FullFrameTargets,
       FullFrameEnabled, 1.0, 1.0, 0.35, 0.38, 0.0,
       0.0, 2.0, 0.0, 0.0,
-      True, ErrorText) then
+      True, False, ErrorText) then
       raise Exception.Create(ErrorText);
     if DestinationRgba[3] <> 0 then
       raise Exception.Create('Full-frame vacated area was not transparent.');
@@ -206,7 +221,7 @@ begin
         @DestinationRgba[0], GripOrigins, GripTargets,
         GripEnabled, 1.0, 1.0, 0.35, 0.38, 0.25,
         15.0, 2.0, 2 * Pi * FrameIndex / 60, 17.0,
-        True, ErrorText) then
+        True, False, ErrorText) then
         raise Exception.Create(ErrorText);
     Elapsed := GetTickCount64 - StartedAt;
     Writeln(Format('30 full-frame grip+ripple frames: %d ms, average: %.1f ms',
