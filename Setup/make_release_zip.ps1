@@ -17,6 +17,27 @@ if (-not (Test-Path -LiteralPath $pluginFile -PathType Leaf)) {
   exit 1
 }
 
+$pluginInfo = Get-Item -LiteralPath $pluginFile
+if ($pluginInfo.Length -lt 1024) {
+  Write-Host 'Filter plugin is too small to be a valid PE file:'
+  Write-Host "  $pluginFile ($($pluginInfo.Length) bytes)"
+  exit 1
+}
+
+$pluginStream = [System.IO.File]::OpenRead($pluginFile)
+try {
+  $mz0 = $pluginStream.ReadByte()
+  $mz1 = $pluginStream.ReadByte()
+}
+finally {
+  $pluginStream.Dispose()
+}
+if ($mz0 -ne 0x4D -or $mz1 -ne 0x5A) {
+  Write-Host 'Filter plugin does not have a valid PE header:'
+  Write-Host "  $pluginFile"
+  exit 1
+}
+
 if ((Test-Path -LiteralPath $debugDll -PathType Leaf) -or
     (Test-Path -LiteralPath $debugSymbols -PathType Leaf)) {
   Write-Host 'Debug build files remain in the plugin directory.'

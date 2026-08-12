@@ -25,7 +25,7 @@ uses
   PluginFilterTable;
 
 const
-  FILTER_EFFECT_NAME = '布をめくる';
+  FILTER_EFFECT_NAME = 'パンチラ';
   CURVE_DATA_ITEM_NAME = '布範囲データ';
 
 var

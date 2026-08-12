@@ -31,10 +31,12 @@ end;
 
 var
   CenterContour: TShakeCurve;
+  Checksum: UInt64;
   DeformationMap: TShakeDeformationMap;
   Destination: TBitmap;
   Elapsed: UInt64;
   ErrorText: string;
+  FrameIndex: Integer;
   FullFrameContour: TShakeCurve;
   FullFrameEnabled: TShakeGripEnabled;
   FullFrameOrigins: TShakeGripPositions;
@@ -129,6 +131,22 @@ begin
       raise Exception.Create(ErrorText);
     if DestinationRgba[3] <> 0 then
       raise Exception.Create('Full-frame vacated area was not transparent.');
+    StartedAt := GetTickCount64;
+    for FrameIndex := 0 to 29 do
+      if not DeformationMap.ApplyGripRgba(@SourceRgba[0],
+        @DestinationRgba[0], GripOrigins, GripTargets,
+        GripEnabled, 1.0, 1.0, 0.35, 0.38, 0.25,
+        15.0, 2.0, 2 * Pi * FrameIndex / 60, 17.0,
+        True, ErrorText) then
+        raise Exception.Create(ErrorText);
+    Elapsed := GetTickCount64 - StartedAt;
+    Writeln(Format('30 full-frame grip+ripple frames: %d ms, average: %.1f ms',
+      [Elapsed, Elapsed / 30.0]));
+    Checksum := 1469598103934665603;
+    for X := 0 to Length(DestinationRgba) - 1 do
+      Checksum := (Checksum xor UInt64(DestinationRgba[X])) *
+        UInt64(1099511628211);
+    Writeln('Output checksum: ', IntToHex(Checksum, 16));
   finally
     FullFrameContour.Free;
     CenterContour.Free;

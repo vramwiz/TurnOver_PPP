@@ -12,6 +12,9 @@ type
   TUninitializePlugin = procedure; cdecl;
   TGetFilterPluginTable = function: PFILTER_PLUGIN_TABLE; cdecl;
 
+const
+  EXPECTED_ITEM_COUNT = 17;
+
 procedure Check(Condition: Boolean; const MessageText: string);
 begin
   if not Condition then
@@ -52,7 +55,7 @@ begin
           'Filter name is empty.');
         Check(Table^.Items <> nil, 'Filter item list is nil.');
         Check(Assigned(Table^.Func_Proc_Video), 'Video callback is nil.');
-        for I := 0 to 10 do
+        for I := 0 to EXPECTED_ITEM_COUNT - 1 do
         begin
           Item := PPointer(NativeUInt(Table^.Items) +
             NativeUInt(I) * SizeOf(Pointer))^;
@@ -61,7 +64,7 @@ begin
           Check(ItemType <> nil, Format('Filter item %d has no type.', [I]));
         end;
         Item := PPointer(NativeUInt(Table^.Items) +
-          NativeUInt(11) * SizeOf(Pointer))^;
+          NativeUInt(EXPECTED_ITEM_COUNT) * SizeOf(Pointer))^;
         Check(Item = nil, 'Filter item list is not nil-terminated.');
       finally
         Uninitialize();

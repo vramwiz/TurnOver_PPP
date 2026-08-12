@@ -76,6 +76,7 @@ Setup\make_release_zip.bat
 バッチは次を確認してから`Setup\TurnOver_PPP.zip`を作成します。
 
 - `C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\TurnOver_PPP.auf2`が存在すること
+- プラグインが最低限のサイズと`MZ`ヘッダーを持つPEファイルであること
 - 同じフォルダーにDebug用DLLまたはRSMが残っていないこと
 - READMEがTurnOver_PPP用であること
 - ZIP内に`TurnOver_PPP\TurnOver_PPP.auf2`と`TurnOver_PPP\README.md`があること

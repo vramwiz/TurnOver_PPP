@@ -60,6 +60,7 @@ implementation
 uses
   System.Math,
   System.SysUtils,
+  System.Threading,
   System.Types,
   Winapi.Windows
 {$IFDEF DEBUG}
@@ -78,6 +79,8 @@ const
   GRIP_PREVIEW_BACKSIDE_STRENGTH = 0.35;
   GRIP_PREVIEW_CAST_SHADOW_STRENGTH = 0.25;
   GRIP_FORESHORTENING_GAIN = 0.45;
+  GRIP_WEIGHT_LUT_SIZE = 4096;
+  GRIP_WEIGHT_MAX_DISTANCE_RATIO = 8.0;
   MASK_GRID_SIZE = 4;
   VARIABLE_OUTER_MOTION_RATIO = 0.35;
 
@@ -86,6 +89,35 @@ type
   TBitmapRows = array of PByte;
   PByteRow = ^TByteRow;
   TByteRow = array[0..268435455] of Byte;
+
+var
+  GripWeightLookup: array[0..GRIP_WEIGHT_LUT_SIZE] of Single;
+
+procedure InitializeGripWeightLookup;
+var
+  I: Integer;
+begin
+  for I := 0 to GRIP_WEIGHT_LUT_SIZE do
+    GripWeightLookup[I] := Exp(-2 * GRIP_WEIGHT_MAX_DISTANCE_RATIO *
+      I / GRIP_WEIGHT_LUT_SIZE);
+end;
+
+function LookupGripWeight(DistanceSquared,
+  InverseRadiusSquared: Double): Double; inline;
+var
+  Fraction: Double;
+  Index: Integer;
+  ScaledDistance: Double;
+begin
+  ScaledDistance := DistanceSquared * InverseRadiusSquared *
+    GRIP_WEIGHT_LUT_SIZE / GRIP_WEIGHT_MAX_DISTANCE_RATIO;
+  if ScaledDistance >= GRIP_WEIGHT_LUT_SIZE then
+    Exit(0);
+  Index := Trunc(ScaledDistance);
+  Fraction := ScaledDistance - Index;
+  Result := GripWeightLookup[Index] * (1 - Fraction) +
+    GripWeightLookup[Index + 1] * Fraction;
+end;
 
 function IsFullFrameClothRange(OuterContour: TShakeCurve): Boolean;
 const
@@ -914,91 +946,34 @@ type
   PRgbaBytes = ^TRgbaBytes;
   TRgbaBytes = array[0..268435455] of Byte;
 var
-  BacksideGray: Double;
-  BacksideWeight: Double;
-  Channel: Integer;
   DestinationBytes: PRgbaBytes;
-  DestinationOffset: NativeInt;
   DistanceSquared: Double;
-  DX: Double;
-  DY: Double;
-  FoldBand: Double;
-  FoldShade: Double;
-  FX: Double;
-  FY: Double;
-  GripDX: Double;
-  GripDY: Double;
-  GripForeshortening: Double;
+  GripDX: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  GripDY: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  GripForeshortening: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
   GripIndex: Integer;
-  GripWeight: Double;
-  Influence: Double;
-  LiftLight: Double;
-  MaskWeight: Double;
-  OutsideDistance: Double;
-  PathOffsetX: Double;
-  PathOffsetY: Double;
-  PixelOffset00: NativeInt;
-  PixelOffset01: NativeInt;
-  PixelOffset10: NativeInt;
-  PixelOffset11: NativeInt;
-  RadiusSquared: Double;
-  Ripple: Double;
-  RippleCoordinate: Double;
+  GripOriginX: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  GripOriginY: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  GripPathInverseLengthSquared:
+    array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  GripPathX: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  GripPathY: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  ImageHeightScale: Double;
+  ImageMaximumDimension: Double;
+  ImageWidthScale: Double;
+  InverseRadiusSquared: Double;
+  RippleAngularScale: Double;
   RippleDirectionCosine: Double;
   RippleDirectionRadians: Double;
   RippleDirectionSine: Double;
-  SampleX: Double;
-  SampleY: Double;
-  SampledChannels: array[0..3] of Double;
-  ShadowAlpha: Integer;
+  RippleStepCosine: Double;
+  RippleStepSine: Double;
   ShadowRadius: Double;
   SourceBytes: PRgbaBytes;
-  TotalWeight: Double;
-  Value: Double;
-  WeightedDX: Double;
-  WeightedDY: Double;
-  WeightedForeshortening: Double;
-  WeightedForeshorteningX: Double;
-  WeightedForeshorteningY: Double;
-  X: Integer;
   XEnd: Integer;
-  X0: Integer;
-  X1: Integer;
   XStart: Integer;
-  Y: Integer;
   YEnd: Integer;
-  Y0: Integer;
-  Y1: Integer;
   YStart: Integer;
-
-  function DistanceSquaredToGripPath(Grip: Integer;
-    PixelX, PixelY: Double; out OffsetX, OffsetY: Double): Double;
-  var
-    LengthSquared: Double;
-    OriginX: Double;
-    OriginY: Double;
-    PathX: Double;
-    PathY: Double;
-    Projection: Double;
-    TargetX: Double;
-    TargetY: Double;
-  begin
-    OriginX := OriginalPositions[Grip].X * Max(1, FWidth - 1);
-    OriginY := OriginalPositions[Grip].Y * Max(1, FHeight - 1);
-    TargetX := TargetPositions[Grip].X * Max(1, FWidth - 1);
-    TargetY := TargetPositions[Grip].Y * Max(1, FHeight - 1);
-    PathX := TargetX - OriginX;
-    PathY := TargetY - OriginY;
-    LengthSquared := PathX * PathX + PathY * PathY;
-    if LengthSquared > 1.0E-9 then
-      Projection := EnsureRange(((PixelX - OriginX) * PathX +
-        (PixelY - OriginY) * PathY) / LengthSquared, 0.0, 1.0)
-    else
-      Projection := 0;
-    OffsetX := PixelX - (OriginX + PathX * Projection);
-    OffsetY := PixelY - (OriginY + PathY * Projection);
-    Result := Sqr(OffsetX) + Sqr(OffsetY);
-  end;
 
 begin
   Result := False;
@@ -1016,15 +991,47 @@ begin
   BacksideStrength := EnsureRange(BacksideStrength, 0.0, 1.0);
   InfluenceRadius := EnsureRange(InfluenceRadius, 0.05, 1.0);
   CastShadowStrength := EnsureRange(CastShadowStrength, 0.0, 1.0);
+  ImageWidthScale := Max(1, FWidth - 1);
+  ImageHeightScale := Max(1, FHeight - 1);
+  ImageMaximumDimension := Max(FWidth, FHeight);
   RippleStrength := EnsureRange(RippleStrength, 0.0,
-    Max(FWidth, FHeight) * 2.0);
+    ImageMaximumDimension * 2.0);
   RippleCount := EnsureRange(RippleCount, 1.0, 10.0);
   RippleDirectionRadians := DegToRad(RippleDirectionDegrees);
   RippleDirectionCosine := Cos(RippleDirectionRadians);
   RippleDirectionSine := Sin(RippleDirectionRadians);
-  Move(SourceBytes^, DestinationBytes^, NativeInt(FWidth) * FHeight * 4);
-  RadiusSquared := Sqr(Max(FWidth, FHeight) * InfluenceRadius);
-  ShadowRadius := Max(1.0, Max(FWidth, FHeight) * GRIP_CAST_SHADOW_RADIUS);
+  RippleAngularScale := 2 * Pi * RippleCount / ImageMaximumDimension;
+  RippleStepSine := Sin(RippleDirectionCosine * RippleAngularScale);
+  RippleStepCosine := Cos(RippleDirectionCosine * RippleAngularScale);
+  InverseRadiusSquared := 1 /
+    Sqr(ImageMaximumDimension * InfluenceRadius);
+  ShadowRadius := Max(1.0,
+    ImageMaximumDimension * GRIP_CAST_SHADOW_RADIUS);
+  for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
+    if Enabled[GripIndex] then
+    begin
+      GripOriginX[GripIndex] := OriginalPositions[GripIndex].X *
+        ImageWidthScale;
+      GripOriginY[GripIndex] := OriginalPositions[GripIndex].Y *
+        ImageHeightScale;
+      GripPathX[GripIndex] := (TargetPositions[GripIndex].X -
+        OriginalPositions[GripIndex].X) * ImageWidthScale;
+      GripPathY[GripIndex] := (TargetPositions[GripIndex].Y -
+        OriginalPositions[GripIndex].Y) * ImageHeightScale;
+      GripDX[GripIndex] := GripPathX[GripIndex];
+      GripDY[GripIndex] := GripPathY[GripIndex];
+      DistanceSquared := Sqr(GripPathX[GripIndex]) +
+        Sqr(GripPathY[GripIndex]);
+      if DistanceSquared > 1.0E-9 then
+        GripPathInverseLengthSquared[GripIndex] := 1 / DistanceSquared
+      else
+        GripPathInverseLengthSquared[GripIndex] := 0;
+      GripForeshortening[GripIndex] := Min(GRIP_MAX_FORESHORTENING,
+        Sqrt(DistanceSquared) / ImageMaximumDimension *
+        GRIP_FORESHORTENING_GAIN) * FoldStrength;
+    end;
+  if not FullFrameMode then
+    Move(SourceBytes^, DestinationBytes^, NativeInt(FWidth) * FHeight * 4);
   if FullFrameMode then
   begin
     XStart := 0;
@@ -1039,9 +1046,74 @@ begin
     XEnd := FActiveRight;
     YEnd := FActiveBottom;
   end;
-  for Y := YStart to YEnd do
+  TParallel.&For(YStart, YEnd,
+    procedure(Y: Integer)
+    var
+      BacksideGray: Double;
+      BacksideWeight: Double;
+      Channel: Integer;
+      DestinationOffset: NativeInt;
+      DistanceSquared: Double;
+      DX: Double;
+      DY: Double;
+      FoldBand: Double;
+      FoldShade: Double;
+      FX: Double;
+      FY: Double;
+      GripIndex: Integer;
+      GripWeight: Double;
+      Influence: Double;
+      LiftLight: Double;
+      MaskWeight: Double;
+      NextRippleCosine: Double;
+      NextRippleSine: Double;
+      OutsideDistance: Double;
+      PathOffsetX: Double;
+      PathOffsetY: Double;
+      PixelOffset00: NativeInt;
+      PixelOffset01: NativeInt;
+      PixelOffset10: NativeInt;
+      PixelOffset11: NativeInt;
+      Projection: Double;
+      Ripple: Double;
+      RippleCosine: Double;
+      RippleSine: Double;
+      SampleX: Double;
+      SampleY: Double;
+      SampledChannels: array[0..3] of Double;
+      ShadowAlpha: Integer;
+      TotalWeight: Double;
+      Value: Double;
+      WeightedDX: Double;
+      WeightedDY: Double;
+      WeightedForeshortening: Double;
+      WeightedForeshorteningX: Double;
+      WeightedForeshorteningY: Double;
+      X: Integer;
+      X0: Integer;
+      X1: Integer;
+      Y0: Integer;
+      Y1: Integer;
+    begin
+    if RippleStrength > 0 then
+    begin
+      RippleSine := Sin((XStart * RippleDirectionCosine +
+        Y * RippleDirectionSine) * RippleAngularScale - RipplePhase);
+      RippleCosine := Cos((XStart * RippleDirectionCosine +
+        Y * RippleDirectionSine) * RippleAngularScale - RipplePhase);
+    end;
     for X := XStart to XEnd do
     begin
+      if RippleStrength > 0 then
+      begin
+        Ripple := RippleSine;
+        NextRippleSine := RippleSine * RippleStepCosine +
+          RippleCosine * RippleStepSine;
+        NextRippleCosine := RippleCosine * RippleStepCosine -
+          RippleSine * RippleStepSine;
+        RippleSine := NextRippleSine;
+        RippleCosine := NextRippleCosine;
+      end;
       if FullFrameMode then
         MaskWeight := 1
       else
@@ -1059,31 +1131,45 @@ begin
       begin
         if not Enabled[GripIndex] then
           Continue;
-        DistanceSquared := DistanceSquaredToGripPath(GripIndex, X, Y,
-          PathOffsetX, PathOffsetY);
-        GripWeight := Exp(-2 * DistanceSquared / RadiusSquared);
-        GripDX := (TargetPositions[GripIndex].X -
-          OriginalPositions[GripIndex].X) * Max(1, FWidth - 1);
-        GripDY := (TargetPositions[GripIndex].Y -
-          OriginalPositions[GripIndex].Y) * Max(1, FHeight - 1);
-        GripForeshortening := Min(GRIP_MAX_FORESHORTENING,
-          Sqrt(GripDX * GripDX + GripDY * GripDY) /
-          Max(FWidth, FHeight) * GRIP_FORESHORTENING_GAIN) * FoldStrength;
+        if GripPathInverseLengthSquared[GripIndex] > 0 then
+          Projection := EnsureRange(((X - GripOriginX[GripIndex]) *
+            GripPathX[GripIndex] + (Y - GripOriginY[GripIndex]) *
+            GripPathY[GripIndex]) *
+            GripPathInverseLengthSquared[GripIndex], 0.0, 1.0)
+        else
+          Projection := 0;
+        PathOffsetX := X - (GripOriginX[GripIndex] +
+          GripPathX[GripIndex] * Projection);
+        PathOffsetY := Y - (GripOriginY[GripIndex] +
+          GripPathY[GripIndex] * Projection);
+        DistanceSquared := Sqr(PathOffsetX) + Sqr(PathOffsetY);
+        GripWeight := LookupGripWeight(DistanceSquared,
+          InverseRadiusSquared);
+        if GripWeight <= 0 then
+          Continue;
         TotalWeight := TotalWeight + GripWeight;
-        WeightedDX := WeightedDX + GripDX * GripWeight;
-        WeightedDY := WeightedDY + GripDY * GripWeight;
+        WeightedDX := WeightedDX + GripDX[GripIndex] * GripWeight;
+        WeightedDY := WeightedDY + GripDY[GripIndex] * GripWeight;
         WeightedForeshortening := WeightedForeshortening +
-          GripForeshortening * GripWeight;
+          GripForeshortening[GripIndex] * GripWeight;
         WeightedForeshorteningX := WeightedForeshorteningX +
-          PathOffsetX * GripForeshortening * GripWeight;
+          PathOffsetX * GripForeshortening[GripIndex] * GripWeight;
         WeightedForeshorteningY := WeightedForeshorteningY +
-          PathOffsetY * GripForeshortening * GripWeight;
+          PathOffsetY * GripForeshortening[GripIndex] * GripWeight;
         Influence := Max(Influence, GripWeight);
       end;
       if TotalWeight <= 1.0E-9 then
       begin
         if RippleStrength <= 0 then
+        begin
+          if FullFrameMode then
+          begin
+            DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
+            PCardinal(@DestinationBytes^[DestinationOffset])^ :=
+              PCardinal(@SourceBytes^[DestinationOffset])^;
+          end;
           Continue;
+        end;
         { A travelling surface wave is independent of the grip falloff. }
         TotalWeight := 1;
         DX := 0;
@@ -1104,10 +1190,7 @@ begin
       end;
       if RippleStrength > 0 then
       begin
-        RippleCoordinate := (X * RippleDirectionCosine +
-          Y * RippleDirectionSine) / Max(FWidth, FHeight);
-        Ripple := Sin(RippleCoordinate * 2 * Pi * RippleCount -
-          RipplePhase) * RippleStrength * MaskWeight;
+        Ripple := Ripple * RippleStrength * MaskWeight;
         DX := DX - RippleDirectionSine * Ripple;
         DY := DY + RippleDirectionCosine * Ripple;
       end;
@@ -1168,6 +1251,7 @@ begin
           EnsureRange(Round(Value), 0, 255);
       end;
     end;
+  end);
   Result := True;
 end;
 
@@ -1353,5 +1437,8 @@ begin
     DeformationMap.Free;
   end;
 end;
+
+initialization
+  InitializeGripWeightLookup;
 
 end.
