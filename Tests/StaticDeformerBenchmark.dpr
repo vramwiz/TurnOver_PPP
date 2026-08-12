@@ -36,6 +36,8 @@ begin
 end;
 
 var
+  AnchorX: Integer;
+  AnchorY: Integer;
   CenterContour: TShakeCurve;
   Checksum: UInt64;
   DeformationMap: TShakeDeformationMap;
@@ -59,6 +61,9 @@ var
   SourceRgba: TBytes;
   StartedAt: UInt64;
   DestinationRgba: TBytes;
+  UpperLeftIndex: Integer;
+  UpperPathStep: Integer;
+  UpperRightIndex: Integer;
   X: Integer;
   Y: Integer;
 begin
@@ -84,6 +89,12 @@ begin
       end;
     end;
     AddEllipse(OuterContour, 0.5, 0.5, 0.42, 0.42);
+    Check(TryGetUpperBoundary(OuterContour, UpperLeftIndex,
+      UpperRightIndex, UpperPathStep),
+      'Upper boundary was not detected.');
+    Check((UpperLeftIndex = 8) and (UpperRightIndex = 11) and
+      (UpperPathStep = 1),
+      'Upper boundary path was detected incorrectly.');
     AddEllipse(CenterContour, 0.5, 0.5, 0.18, 0.18);
     FullFrameContour.AddVertex(PointF(0, 0), svkCorner);
     FullFrameContour.AddVertex(PointF(1, 0), svkCorner);
@@ -136,6 +147,24 @@ begin
       raise Exception.Create(ErrorText);
     Check(PCardinal(@DestinationRgba[0])^ = PCardinal(@SourceRgba[0])^,
       'Partial selection changed a fixed outside pixel.');
+    AnchorX := Round(OuterContour[8].Position.X * (Source.Width - 1));
+    AnchorY := Round(OuterContour[8].Position.Y * (Source.Height - 1));
+    PixelOffset := (NativeInt(AnchorY) * Source.Width + AnchorX) * 4;
+    Check(PCardinal(@DestinationRgba[PixelOffset])^ =
+      PCardinal(@SourceRgba[PixelOffset])^,
+      'Partial selection moved its upper-left anchor.');
+    AnchorX := Round(OuterContour[9].Position.X * (Source.Width - 1));
+    AnchorY := Round(OuterContour[9].Position.Y * (Source.Height - 1));
+    PixelOffset := (NativeInt(AnchorY) * Source.Width + AnchorX) * 4;
+    Check(PCardinal(@DestinationRgba[PixelOffset])^ =
+      PCardinal(@SourceRgba[PixelOffset])^,
+      'Partial selection moved its upper seam.');
+    AnchorX := Round(OuterContour[11].Position.X * (Source.Width - 1));
+    AnchorY := Round(OuterContour[11].Position.Y * (Source.Height - 1));
+    PixelOffset := (NativeInt(AnchorY) * Source.Width + AnchorX) * 4;
+    Check(PCardinal(@DestinationRgba[PixelOffset])^ =
+      PCardinal(@SourceRgba[PixelOffset])^,
+      'Partial selection moved its upper-right anchor.');
     HasVacatedPixel := False;
     MovedBeyondOriginalTop := False;
     for Y := 0 to Source.Height - 1 do

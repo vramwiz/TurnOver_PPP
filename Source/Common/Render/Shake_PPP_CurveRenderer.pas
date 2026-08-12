@@ -91,6 +91,11 @@ var
   Points: array[0..3] of TPoint;
   SegmentCount: Integer;
   StartRadius: Integer;
+  UpperColor: TColor;
+  UpperLeftIndex: Integer;
+  UpperPathStep: Integer;
+  UpperRightIndex: Integer;
+  UpperValid: Boolean;
   VertexPoint: TPoint;
   VertexRadius: Integer;
   VertexRect: TRect;
@@ -111,6 +116,13 @@ begin
     else
       BaseColor := RGB(200, 132, 38);
   end;
+  if IsActive then
+    UpperColor := RGB(255, 145, 35)
+  else
+    UpperColor := RGB(205, 105, 25);
+  UpperValid := (CurveKind = sckOuterContour) and
+    TryGetUpperBoundary(Curve, UpperLeftIndex, UpperRightIndex,
+    UpperPathStep);
   Canvas.Pen.Style := psSolid;
   if IsActive then
     Canvas.Pen.Width := Max(2, MulDiv(2, PPI, 96))
@@ -122,7 +134,19 @@ begin
     Inc(SegmentCount);
   for I := 0 to SegmentCount - 1 do
   begin
-    if Curve.Closed and (I = Curve.Count - 1) then
+    if UpperValid and
+      IsVertexOnCurvePath(I, UpperLeftIndex, UpperRightIndex,
+      UpperPathStep, Curve.Count) and
+      IsVertexOnCurvePath((I + 1) mod Curve.Count, UpperLeftIndex,
+      UpperRightIndex, UpperPathStep, Curve.Count) then
+    begin
+      Canvas.Pen.Color := UpperColor;
+      if IsActive then
+        Canvas.Pen.Width := Max(3, MulDiv(3, PPI, 96))
+      else
+        Canvas.Pen.Width := Max(2, MulDiv(2, PPI, 96));
+    end
+    else if Curve.Closed and (I = Curve.Count - 1) then
     begin
       if IsActive then
         Canvas.Pen.Color := RGB(255, 55, 205)
@@ -171,6 +195,9 @@ begin
       end;
       if I = SelectedVertex then
         Canvas.Pen.Color := clYellow
+      else if UpperValid and IsVertexOnCurvePath(I, UpperLeftIndex,
+        UpperRightIndex, UpperPathStep, Curve.Count) then
+        Canvas.Pen.Color := UpperColor
       else
         Canvas.Pen.Color := RGB(80, 255, 120);
       Canvas.Rectangle(VertexRect);
@@ -178,7 +205,11 @@ begin
       begin
         InflateRect(VertexRect, -3, -3);
         Canvas.Brush.Style := bsClear;
-        Canvas.Pen.Color := RGB(185, 255, 200);
+        if UpperValid and IsVertexOnCurvePath(I, UpperLeftIndex,
+          UpperRightIndex, UpperPathStep, Curve.Count) then
+          Canvas.Pen.Color := UpperColor
+        else
+          Canvas.Pen.Color := RGB(185, 255, 200);
         Canvas.Rectangle(VertexRect);
       end;
       Continue;
@@ -186,9 +217,16 @@ begin
     VertexRect := Rect(VertexPoint.X - VertexRadius,
       VertexPoint.Y - VertexRadius, VertexPoint.X + VertexRadius + 1,
       VertexPoint.Y + VertexRadius + 1);
-    Canvas.Pen.Color := BaseColor;
+    if UpperValid and IsVertexOnCurvePath(I, UpperLeftIndex,
+      UpperRightIndex, UpperPathStep, Curve.Count) then
+      Canvas.Pen.Color := UpperColor
+    else
+      Canvas.Pen.Color := BaseColor;
     if I = SelectedVertex then
       Canvas.Brush.Color := clYellow
+    else if UpperValid and IsVertexOnCurvePath(I, UpperLeftIndex,
+      UpperRightIndex, UpperPathStep, Curve.Count) then
+      Canvas.Brush.Color := UpperColor
     else
       Canvas.Brush.Color := BaseColor;
     Canvas.Brush.Style := bsSolid;

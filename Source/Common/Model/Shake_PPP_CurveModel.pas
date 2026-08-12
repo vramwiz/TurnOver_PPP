@@ -55,10 +55,104 @@ type
   TShakeGripEnabled = array[0..SHAKE_GRIP_POINT_COUNT - 1] of Boolean;
   TShakeGripPositions = array[0..SHAKE_GRIP_POINT_COUNT - 1] of TPointF;
 
+function TryGetUpperBoundary(Curve: TShakeCurve; out LeftIndex,
+  RightIndex, PathStep: Integer): Boolean;
+function IsVertexOnCurvePath(VertexIndex, StartIndex, EndIndex,
+  PathStep, VertexCount: Integer): Boolean;
+
 implementation
 
 uses
   System.Math;
+
+function IsVertexOnCurvePath(VertexIndex, StartIndex, EndIndex,
+  PathStep, VertexCount: Integer): Boolean;
+var
+  I: Integer;
+  Visited: Integer;
+begin
+  Result := False;
+  if (VertexCount <= 0) or ((PathStep <> 1) and (PathStep <> -1)) then
+    Exit;
+  I := StartIndex;
+  for Visited := 0 to VertexCount - 1 do
+  begin
+    if I = VertexIndex then
+      Exit(True);
+    if I = EndIndex then
+      Exit;
+    I := (I + PathStep + VertexCount) mod VertexCount;
+  end;
+end;
+
+function TryGetUpperBoundary(Curve: TShakeCurve; out LeftIndex,
+  RightIndex, PathStep: Integer): Boolean;
+var
+  ForwardAverageY: Double;
+  ForwardCount: Integer;
+  I: Integer;
+  MaximumY: Double;
+  MinimumY: Double;
+  ReverseAverageY: Double;
+  ReverseCount: Integer;
+  TopBandLimit: Double;
+  Visited: Integer;
+begin
+  Result := False;
+  LeftIndex := -1;
+  RightIndex := -1;
+  PathStep := 0;
+  if (Curve = nil) or not Curve.Closed or (Curve.Count < 3) then
+    Exit;
+  MinimumY := 1;
+  MaximumY := 0;
+  for I := 0 to Curve.Count - 1 do
+  begin
+    MinimumY := Min(MinimumY, Curve[I].Position.Y);
+    MaximumY := Max(MaximumY, Curve[I].Position.Y);
+  end;
+  TopBandLimit := MinimumY + (MaximumY - MinimumY) * 0.25;
+  for I := 0 to Curve.Count - 1 do
+    if Curve[I].Position.Y <= TopBandLimit then
+    begin
+      if (LeftIndex < 0) or
+        (Curve[I].Position.X < Curve[LeftIndex].Position.X) then
+        LeftIndex := I;
+      if (RightIndex < 0) or
+        (Curve[I].Position.X > Curve[RightIndex].Position.X) then
+        RightIndex := I;
+    end;
+  if (LeftIndex < 0) or (RightIndex < 0) then
+    Exit;
+  ForwardAverageY := 0;
+  ForwardCount := 0;
+  I := LeftIndex;
+  for Visited := 0 to Curve.Count - 1 do
+  begin
+    ForwardAverageY := ForwardAverageY + Curve[I].Position.Y;
+    Inc(ForwardCount);
+    if I = RightIndex then
+      Break;
+    I := (I + 1) mod Curve.Count;
+  end;
+  ReverseAverageY := 0;
+  ReverseCount := 0;
+  I := LeftIndex;
+  for Visited := 0 to Curve.Count - 1 do
+  begin
+    ReverseAverageY := ReverseAverageY + Curve[I].Position.Y;
+    Inc(ReverseCount);
+    if I = RightIndex then
+      Break;
+    I := (I - 1 + Curve.Count) mod Curve.Count;
+  end;
+  if ForwardAverageY / Max(1, ForwardCount) <=
+    ReverseAverageY / Max(1, ReverseCount) then
+    PathStep := 1
+  else
+    PathStep := -1;
+  Result := True;
+end;
 
 constructor TShakeCurve.Create;
 begin

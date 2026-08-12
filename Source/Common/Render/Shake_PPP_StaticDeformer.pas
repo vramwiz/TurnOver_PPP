@@ -3,6 +3,7 @@ unit Shake_PPP_StaticDeformer;
 interface
 
 uses
+  System.Types,
   Vcl.Graphics,
   Shake_PPP_CurveModel;
 
@@ -15,6 +16,10 @@ type
     FActiveLeft: Integer;
     FActiveRight: Integer;
     FActiveTop: Integer;
+    FFixedTopBlend: TArray<Single>;
+    FFixedTopLeft: TPointF;
+    FFixedTopRight: TPointF;
+    FFixedTopValid: Boolean;
     FCoverage: TArray<Single>;
     FHeight: Integer;
     FLastTimingLog: UInt64;
@@ -65,7 +70,6 @@ uses
   System.Math,
   System.SysUtils,
   System.Threading,
-  System.Types,
   Winapi.Windows
 {$IFDEF DEBUG}
   , Shake_PPP_DebugLog
@@ -86,6 +90,7 @@ const
   GRIP_WEIGHT_LUT_SIZE = 4096;
   GRIP_WEIGHT_MAX_DISTANCE_RATIO = 8.0;
   MASK_GRID_SIZE = 4;
+  PARTIAL_FIXED_ANCHOR_RADIUS_RATIO = 0.06;
   PARTIAL_SELECTION_MARGIN_RATIO = 0.0064;
   VARIABLE_OUTER_MOTION_RATIO = 0.35;
 
@@ -378,6 +383,7 @@ end;
 procedure TShakeDeformationMap.Clear;
 begin
   FCoverage := nil;
+  FFixedTopBlend := nil;
   FWeights := nil;
   FWidth := 0;
   FHeight := 0;
@@ -385,6 +391,9 @@ begin
   FActiveTop := 0;
   FActiveRight := -1;
   FActiveBottom := -1;
+  FFixedTopLeft := PointF(0, 0);
+  FFixedTopRight := PointF(0, 0);
+  FFixedTopValid := False;
   FLastTimingLog := 0;
 end;
 
@@ -395,6 +404,7 @@ var
   Aspect: Double;
   CenterPolygon: TArray<TPointF>;
   ExpandedCoverage: TArray<Single>;
+  FixedTopGrid: TDoubleArray;
   GridHeight: Integer;
   GridWidth: Integer;
   GridX: Integer;
@@ -404,6 +414,9 @@ var
   NormalizedX: Double;
   NormalizedY: Double;
   OuterPolygon: TArray<TPointF>;
+  UpperLeftIndex: Integer;
+  UpperPathStep: Integer;
+  UpperRightIndex: Integer;
   SelectionMarginPixels: Integer;
   WindowAddIndex: Integer;
   WindowCount: Integer;
@@ -421,6 +434,65 @@ var
   X: Integer;
   Y: Integer;
   Weight: Double;
+
+  function FixedTopBlendAt(NormalizedPixelX,
+    NormalizedPixelY: Double): Double;
+  var
+    ClosestX: Double;
+    ClosestY: Double;
+    DistanceSquared: Double;
+    DX: Double;
+    DY: Double;
+    I: Integer;
+    J: Integer;
+    LengthSquared: Double;
+    MinimumDistanceSquared: Double;
+    Projection: Double;
+    RadiusSquared: Double;
+    SegmentIndex: Integer;
+  begin
+    if not FFixedTopValid then
+      Exit(1);
+    MinimumDistanceSquared := MaxDouble;
+    for I := 0 to High(OuterPolygon) do
+    begin
+      SegmentIndex := I div CURVE_SAMPLES_PER_SEGMENT;
+      if not IsVertexOnCurvePath(SegmentIndex, UpperLeftIndex,
+        UpperRightIndex, UpperPathStep, OuterContour.Count) or
+        not IsVertexOnCurvePath((SegmentIndex + 1) mod OuterContour.Count,
+        UpperLeftIndex, UpperRightIndex, UpperPathStep,
+        OuterContour.Count) then
+        Continue;
+      J := (I + 1) mod Length(OuterPolygon);
+      DX := (OuterPolygon[J].X - OuterPolygon[I].X) *
+        Max(1, Width - 1);
+      DY := (OuterPolygon[J].Y - OuterPolygon[I].Y) *
+        Max(1, Height - 1);
+      LengthSquared := DX * DX + DY * DY;
+      if LengthSquared > 1.0E-9 then
+        Projection := EnsureRange(
+          (((NormalizedPixelX - OuterPolygon[I].X) * Max(1, Width - 1)) *
+          DX + ((NormalizedPixelY - OuterPolygon[I].Y) *
+          Max(1, Height - 1)) * DY) / LengthSquared, 0.0, 1.0)
+      else
+        Projection := 0;
+      ClosestX := OuterPolygon[I].X +
+        (OuterPolygon[J].X - OuterPolygon[I].X) * Projection;
+      ClosestY := OuterPolygon[I].Y +
+        (OuterPolygon[J].Y - OuterPolygon[I].Y) * Projection;
+      DistanceSquared := Sqr((NormalizedPixelX - ClosestX) *
+        Max(1, Width - 1)) + Sqr((NormalizedPixelY - ClosestY) *
+        Max(1, Height - 1));
+      MinimumDistanceSquared := Min(MinimumDistanceSquared,
+        DistanceSquared);
+    end;
+    if MinimumDistanceSquared <= 2 then
+      Exit(0);
+    RadiusSquared := Sqr(Max(Width, Height) *
+      PARTIAL_FIXED_ANCHOR_RADIUS_RATIO);
+    Result := MinimumDistanceSquared /
+      (MinimumDistanceSquared + RadiusSquared);
+  end;
 begin
   Result := False;
   ErrorText := '';
@@ -437,6 +509,21 @@ begin
     Exit;
   end;
   OuterPolygon := FlattenCurve(OuterContour);
+  FFixedTopValid := TryGetUpperBoundary(OuterContour, UpperLeftIndex,
+    UpperRightIndex, UpperPathStep);
+  if FFixedTopValid then
+  begin
+    FFixedTopLeft := OuterContour[UpperLeftIndex].Position;
+    FFixedTopRight := OuterContour[UpperRightIndex].Position;
+  end;
+{$IFDEF DEBUG}
+  if FFixedTopValid then
+    DebugLog(Format(
+      'Partial fixed anchors: left=(%.4f,%.4f) right=(%.4f,%.4f) pathStep=%d radiusRatio=%.3f.',
+      [FFixedTopLeft.X, FFixedTopLeft.Y, FFixedTopRight.X,
+       FFixedTopRight.Y, UpperPathStep,
+       PARTIAL_FIXED_ANCHOR_RADIUS_RATIO]));
+{$ENDIF}
   UseCenterContour := (CenterContour <> nil) and CenterContour.Closed and
     (CenterContour.Count >= 3);
   if UseCenterContour then
@@ -449,6 +536,7 @@ begin
   GridWidth := (Width + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
   GridHeight := (Height + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
   SetLength(Mask, GridWidth * GridHeight);
+  SetLength(FixedTopGrid, GridWidth * GridHeight);
   AffectedLeft := Width;
   AffectedTop := Height;
   AffectedRight := -1;
@@ -464,6 +552,7 @@ begin
 {$ENDIF}
   for GridY := 0 to GridHeight - 1 do
     for GridX := 0 to GridWidth - 1 do
+    begin
       if UseCenterContour then
         Mask[GridY * GridWidth + GridX] := MaskValue(OuterPolygon,
           CenterPolygon, Min(GridX * MASK_GRID_SIZE, Width - 1) /
@@ -475,9 +564,15 @@ begin
           Min(GridX * MASK_GRID_SIZE, Width - 1) / Max(1, Width - 1),
           1 - Min(GridY * MASK_GRID_SIZE, Height - 1) /
           Max(1, Height - 1), Aspect);
+      FixedTopGrid[GridY * GridWidth + GridX] := FixedTopBlendAt(
+        Min(GridX * MASK_GRID_SIZE, Width - 1) / Max(1, Width - 1),
+        1 - Min(GridY * MASK_GRID_SIZE, Height - 1) /
+        Max(1, Height - 1));
+    end;
   FWidth := Width;
   FHeight := Height;
   SetLength(FCoverage, FWidth * FHeight);
+  SetLength(FFixedTopBlend, FWidth * FHeight);
   SetLength(FWeights, FWidth * FHeight);
   for Y := 0 to FHeight - 1 do
     for X := 0 to FWidth - 1 do
@@ -489,6 +584,8 @@ begin
       if not InsideOuter then
         Weight := 0;
       FCoverage[Y * FWidth + X] := Ord(InsideOuter);
+      FFixedTopBlend[Y * FWidth + X] := InterpolatedMask(FixedTopGrid,
+        GridWidth, GridHeight, X, Y);
       FWeights[Y * FWidth + X] := Weight;
     end;
   if not IsFullFrameClothRange(OuterContour) then
@@ -1089,7 +1186,8 @@ begin
   ErrorText := '';
   if (Source = nil) or (Destination = nil) or (FWidth <= 0) or
     (FHeight <= 0) or (Length(FWeights) <> FWidth * FHeight) or
-    (Length(FCoverage) <> FWidth * FHeight) then
+    (Length(FCoverage) <> FWidth * FHeight) or
+    (Length(FFixedTopBlend) <> FWidth * FHeight) then
   begin
     ErrorText := 'MAP_NOT_READY';
     Exit;
@@ -1298,6 +1396,7 @@ begin
       OutsideDistance: Double;
       PathOffsetX: Double;
       PathOffsetY: Double;
+      PartialAnchorBlend: Double;
       PixelOffset00: NativeInt;
       PixelOffset01: NativeInt;
       PixelOffset10: NativeInt;
@@ -1336,6 +1435,11 @@ begin
     end;
     for X := XStart to XEnd do
     begin
+      if FullFrameMode then
+        PartialAnchorBlend := 1
+      else
+        PartialAnchorBlend := FFixedTopBlend[
+          (FHeight - 1 - Y) * FWidth + X];
       if RippleStrength > 0 then
       begin
         Ripple := RippleSine;
@@ -1463,6 +1567,8 @@ begin
           SampleX := SampleX + RippleDirectionSine * Ripple;
           SampleY := SampleY - RippleDirectionCosine * Ripple;
         end;
+        SampleX := X + (SampleX - X) * PartialAnchorBlend;
+        SampleY := Y + (SampleY - Y) * PartialAnchorBlend;
       end;
       DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
       if FullFrameMode and ((SampleX < 0) or (SampleX > FWidth - 1) or
@@ -1497,8 +1603,10 @@ begin
           Weight11 * MapFX) * MapFY);
         if MaskWeight <= 0 then
           Continue;
-        FoldShade := 1 + (FoldShade - 1) * MaskWeight;
-        LiftLight := 1 + (LiftLight - 1) * MaskWeight;
+        FoldShade := 1 + (FoldShade - 1) * MaskWeight *
+          PartialAnchorBlend;
+        LiftLight := 1 + (LiftLight - 1) * MaskWeight *
+          PartialAnchorBlend;
       end;
       SampleX := EnsureRange(SampleX, 0.0, FWidth - 1.0);
       SampleY := EnsureRange(SampleY, 0.0, FHeight - 1.0);
@@ -1524,7 +1632,7 @@ begin
         SampledChannels[2]) / 3;
       BacksideWeight := EnsureRange(WeightedForeshortening / TotalWeight /
         GRIP_MAX_FORESHORTENING * Sqr(Influence) * MaskWeight *
-        BacksideStrength, 0.0, 1.0);
+        BacksideStrength * PartialAnchorBlend, 0.0, 1.0);
       for Channel := 0 to 3 do
       begin
         Value := SampledChannels[Channel];
