@@ -20,6 +20,7 @@ type
     FFixedTopLeft: TPointF;
     FFixedTopRight: TPointF;
     FFixedTopValid: Boolean;
+    FFixedEdge: TTurnOverFixedEdge;
     FCoverage: TArray<Single>;
     FTightCoverage: TArray<Single>;
     FHeight: Integer;
@@ -29,7 +30,10 @@ type
   public
     procedure Clear;
     function Build(Width, Height: Integer; OuterContour,
-      CenterContour: TShakeCurve; out ErrorText: string): Boolean;
+      CenterContour: TShakeCurve; out ErrorText: string): Boolean; overload;
+    function Build(Width, Height: Integer; OuterContour,
+      CenterContour: TShakeCurve; FixedEdge: TTurnOverFixedEdge;
+      out ErrorText: string): Boolean; overload;
     function Apply(Source, Destination: TBitmap;
       DisplacementX, DisplacementY: Double;
       out ErrorText: string): Boolean;
@@ -39,8 +43,11 @@ type
       out ErrorText: string): Boolean;
     function ApplyGripRgba(Source, Destination: Pointer;
       const OriginalPositions, TargetPositions: TShakeGripPositions;
-      const Enabled: TShakeGripEnabled; FoldStrength, LightingStrength,
-      BacksideStrength, InfluenceRadius, CastShadowStrength: Double;
+      const Enabled: TShakeGripEnabled; BillowStyle: TTurnOverBillowStyle;
+      BillowDisplacementX, BillowDisplacementY, BillowStrength,
+      GravityStrength, ShrinkRate, FoldStrength, LightingStrength,
+      BacksideStrength,
+      InfluenceRadius, CastShadowStrength: Double;
       RippleStrength, RippleCount, RipplePhase,
       RippleDirectionDegrees: Double; FullFrameMode,
       TightPartialCoverage: Boolean;
@@ -52,6 +59,7 @@ type
       DisplacementX, DisplacementY: Double;
       out ErrorText: string): Boolean;
 {$IFDEF DEBUG}
+    function DebugFixedTopBlendAt(X, Y: Integer): Double;
     procedure SaveDebugCoverageBitmap(const FileName: string;
       TightPartialCoverage: Boolean);
 {$ENDIF}
@@ -92,13 +100,20 @@ const
   GRIP_FORESHORTENING_GAIN = 0.45;
   GRIP_WEIGHT_LUT_SIZE = 4096;
   GRIP_WEIGHT_MAX_DISTANCE_RATIO = 8.0;
+  FLUTTER_DEPTH_LUT_SIZE = 256;
+  FLUTTER_MAX_NORMAL_STEP = 0.35;
+  FIXED_TOP_GRID_SIZE = 8;
   MASK_GRID_SIZE = 4;
-  PARTIAL_FIXED_ANCHOR_RADIUS_RATIO = 0.06;
   PARTIAL_SELECTION_MARGIN_RATIO = 0.0064;
   PARTIAL_TIGHT_SELECTION_MARGIN_PIXELS = 2;
   VARIABLE_OUTER_MOTION_RATIO = 0.35;
 
 type
+  TBoundarySegment = record
+    Point0: TPointF;
+    Point1: TPointF;
+  end;
+  TBoundarySegments = TArray<TBoundarySegment>;
   TDoubleArray = array of Double;
   TBitmapRows = array of PByte;
   PByteRow = ^TByteRow;
@@ -306,7 +321,7 @@ begin
 end;
 
 function InterpolatedMask(const Mask: TDoubleArray; GridWidth, GridHeight,
-  X, Y: Integer): Double;
+  GridSize, X, Y: Integer): Double;
 var
   FX: Double;
   FY: Double;
@@ -317,8 +332,8 @@ var
   Y0: Integer;
   Y1: Integer;
 begin
-  GridX := X / MASK_GRID_SIZE;
-  GridY := Y / MASK_GRID_SIZE;
+  GridX := X / GridSize;
+  GridY := Y / GridSize;
   X0 := EnsureRange(Trunc(GridX), 0, GridWidth - 1);
   Y0 := EnsureRange(Trunc(GridY), 0, GridHeight - 1);
   X1 := Min(X0 + 1, GridWidth - 1);
@@ -399,17 +414,36 @@ begin
   FFixedTopLeft := PointF(0, 0);
   FFixedTopRight := PointF(0, 0);
   FFixedTopValid := False;
+  FFixedEdge := tfeTop;
   FLastTimingLog := 0;
 end;
 
 function TShakeDeformationMap.Build(Width, Height: Integer;
   OuterContour, CenterContour: TShakeCurve;
   out ErrorText: string): Boolean;
+begin
+  Result := Build(Width, Height, OuterContour, CenterContour, tfeTop,
+    ErrorText);
+end;
+
+function TShakeDeformationMap.Build(Width, Height: Integer;
+  OuterContour, CenterContour: TShakeCurve;
+  FixedEdge: TTurnOverFixedEdge;
+  out ErrorText: string): Boolean;
 var
   Aspect: Double;
   CenterPolygon: TArray<TPointF>;
   ExpandedCoverage: TArray<Single>;
   FixedTopGrid: TDoubleArray;
+  FixedTopGridHeight: Integer;
+  FixedTopGridWidth: Integer;
+  FixedTopGridX: Integer;
+  FixedTopGridY: Integer;
+  FixedTopSegments: TBoundarySegments;
+  FixedTopPixelX: Integer;
+  FixedTopPixelY: Integer;
+  FixedTopStep: Integer;
+  FixedTopStepCount: Integer;
   GridHeight: Integer;
   GridWidth: Integer;
   GridX: Integer;
@@ -418,6 +452,12 @@ var
   Mask: TDoubleArray;
   NormalizedX: Double;
   NormalizedY: Double;
+  LowerBoundarySegments: TBoundarySegments;
+  OppositeBoundaryValid: Boolean;
+  OppositeEdge: TTurnOverFixedEdge;
+  OppositeFirstIndex: Integer;
+  OppositePathStep: Integer;
+  OppositeSecondIndex: Integer;
   OuterPolygon: TArray<TPointF>;
   UpperLeftIndex: Integer;
   UpperPathStep: Integer;
@@ -436,6 +476,45 @@ var
   X: Integer;
   Y: Integer;
   Weight: Double;
+
+  function DistanceSquaredToBoundary(const Segments: TBoundarySegments;
+    NormalizedPixelX, NormalizedPixelY: Double): Double;
+  var
+    ClosestX: Double;
+    ClosestY: Double;
+    DistanceSquared: Double;
+    DX: Double;
+    DY: Double;
+    I: Integer;
+    LengthSquared: Double;
+    Projection: Double;
+  begin
+    Result := MaxDouble;
+    for I := 0 to High(Segments) do
+    begin
+      DX := (Segments[I].Point1.X - Segments[I].Point0.X) *
+        Max(1, Width - 1);
+      DY := (Segments[I].Point1.Y - Segments[I].Point0.Y) *
+        Max(1, Height - 1);
+      LengthSquared := DX * DX + DY * DY;
+      if LengthSquared > 1.0E-9 then
+        Projection := EnsureRange(
+          (((NormalizedPixelX - Segments[I].Point0.X) *
+          Max(1, Width - 1)) * DX +
+          ((NormalizedPixelY - Segments[I].Point0.Y) *
+          Max(1, Height - 1)) * DY) / LengthSquared, 0.0, 1.0)
+      else
+        Projection := 0;
+      ClosestX := Segments[I].Point0.X +
+        (Segments[I].Point1.X - Segments[I].Point0.X) * Projection;
+      ClosestY := Segments[I].Point0.Y +
+        (Segments[I].Point1.Y - Segments[I].Point0.Y) * Projection;
+      DistanceSquared := Sqr((NormalizedPixelX - ClosestX) *
+        Max(1, Width - 1)) + Sqr((NormalizedPixelY - ClosestY) *
+        Max(1, Height - 1));
+      Result := Min(Result, DistanceSquared);
+    end;
+  end;
 
   procedure DilateCoverage(const SourceCoverage: TArray<Single>;
     MarginPixels: Integer; out DestinationCoverage: TArray<Single>);
@@ -494,65 +573,39 @@ var
   function FixedTopBlendAt(NormalizedPixelX,
     NormalizedPixelY: Double): Double;
   var
-    ClosestX: Double;
-    ClosestY: Double;
-    DistanceSquared: Double;
-    DX: Double;
-    DY: Double;
-    I: Integer;
-    J: Integer;
-    LengthSquared: Double;
-    MinimumDistanceSquared: Double;
-    Projection: Double;
-    RadiusSquared: Double;
-    SegmentIndex: Integer;
+    MinimumLowerDistanceSquared: Double;
+    MinimumTopDistanceSquared: Double;
+    TopDistance: Double;
+    LowerDistance: Double;
   begin
     if not FFixedTopValid then
       Exit(1);
-    MinimumDistanceSquared := MaxDouble;
-    for I := 0 to High(OuterPolygon) do
-    begin
-      SegmentIndex := I div CURVE_SAMPLES_PER_SEGMENT;
-      if not IsVertexOnCurvePath(SegmentIndex, UpperLeftIndex,
-        UpperRightIndex, UpperPathStep, OuterContour.Count) or
-        not IsVertexOnCurvePath((SegmentIndex + 1) mod OuterContour.Count,
-        UpperLeftIndex, UpperRightIndex, UpperPathStep,
-        OuterContour.Count) then
-        Continue;
-      J := (I + 1) mod Length(OuterPolygon);
-      DX := (OuterPolygon[J].X - OuterPolygon[I].X) *
-        Max(1, Width - 1);
-      DY := (OuterPolygon[J].Y - OuterPolygon[I].Y) *
-        Max(1, Height - 1);
-      LengthSquared := DX * DX + DY * DY;
-      if LengthSquared > 1.0E-9 then
-        Projection := EnsureRange(
-          (((NormalizedPixelX - OuterPolygon[I].X) * Max(1, Width - 1)) *
-          DX + ((NormalizedPixelY - OuterPolygon[I].Y) *
-          Max(1, Height - 1)) * DY) / LengthSquared, 0.0, 1.0)
-      else
-        Projection := 0;
-      ClosestX := OuterPolygon[I].X +
-        (OuterPolygon[J].X - OuterPolygon[I].X) * Projection;
-      ClosestY := OuterPolygon[I].Y +
-        (OuterPolygon[J].Y - OuterPolygon[I].Y) * Projection;
-      DistanceSquared := Sqr((NormalizedPixelX - ClosestX) *
-        Max(1, Width - 1)) + Sqr((NormalizedPixelY - ClosestY) *
-        Max(1, Height - 1));
-      MinimumDistanceSquared := Min(MinimumDistanceSquared,
-        DistanceSquared);
-    end;
-    if MinimumDistanceSquared <= 2 then
+    MinimumTopDistanceSquared := DistanceSquaredToBoundary(FixedTopSegments,
+      NormalizedPixelX, NormalizedPixelY);
+    MinimumLowerDistanceSquared := DistanceSquaredToBoundary(
+      LowerBoundarySegments, NormalizedPixelX, NormalizedPixelY);
+    if MinimumTopDistanceSquared <= 2 then
       Exit(0);
-    RadiusSquared := Sqr(Max(Width, Height) *
-      PARTIAL_FIXED_ANCHOR_RADIUS_RATIO);
-    Result := MinimumDistanceSquared /
-      (MinimumDistanceSquared + RadiusSquared);
+    if MinimumLowerDistanceSquared <= 2 then
+      Exit(1);
+    if (MinimumTopDistanceSquared = MaxDouble) or
+      (MinimumLowerDistanceSquared = MaxDouble) then
+      Exit(1);
+    TopDistance := Sqrt(MinimumTopDistanceSquared);
+    LowerDistance := Sqrt(MinimumLowerDistanceSquared);
+    Result := TopDistance / Max(1.0E-9, TopDistance + LowerDistance);
+    { Normalize the attachment over the whole cloth depth.  A fixed pixel
+      radius can force a large grip motion through a narrow transition and
+      reverse the sampling coordinates.  The opposite-boundary distance keeps
+      the transition broad while still reaching exactly 0 and 1 at the fixed
+      and movable edges. }
+    Result := Result * Result * (3 - 2 * Result);
   end;
 begin
   Result := False;
   ErrorText := '';
   Clear;
+  FFixedEdge := FixedEdge;
   if (Width <= 0) or (Height <= 0) then
   begin
     ErrorText := 'NO_IMAGE';
@@ -565,8 +618,51 @@ begin
     Exit;
   end;
   OuterPolygon := FlattenCurve(OuterContour);
-  FFixedTopValid := TryGetUpperBoundary(OuterContour, UpperLeftIndex,
-    UpperRightIndex, UpperPathStep);
+  FFixedTopValid := TryGetFixedBoundary(OuterContour, FixedEdge,
+    UpperLeftIndex, UpperRightIndex, UpperPathStep);
+  case FixedEdge of
+    tfeTop: OppositeEdge := tfeBottom;
+    tfeBottom: OppositeEdge := tfeTop;
+    tfeLeft: OppositeEdge := tfeRight;
+  else
+    OppositeEdge := tfeLeft;
+  end;
+  OppositeBoundaryValid := TryGetFixedBoundary(OuterContour, OppositeEdge,
+    OppositeFirstIndex, OppositeSecondIndex, OppositePathStep);
+  SetLength(FixedTopSegments, Length(OuterPolygon));
+  SetLength(LowerBoundarySegments, Length(OuterPolygon));
+  AffectedLeft := 0;
+  AffectedRight := 0;
+  for X := 0 to High(OuterPolygon) do
+  begin
+    Y := (X + 1) mod Length(OuterPolygon);
+    if FFixedTopValid and
+      IsVertexOnCurvePath(X div CURVE_SAMPLES_PER_SEGMENT,
+        UpperLeftIndex, UpperRightIndex, UpperPathStep,
+        OuterContour.Count) and
+      IsVertexOnCurvePath(((X div CURVE_SAMPLES_PER_SEGMENT) + 1) mod
+        OuterContour.Count, UpperLeftIndex, UpperRightIndex, UpperPathStep,
+        OuterContour.Count) then
+    begin
+      FixedTopSegments[AffectedLeft].Point0 := OuterPolygon[X];
+      FixedTopSegments[AffectedLeft].Point1 := OuterPolygon[Y];
+      Inc(AffectedLeft);
+    end
+    else if OppositeBoundaryValid and
+      IsVertexOnCurvePath(X div CURVE_SAMPLES_PER_SEGMENT,
+        OppositeFirstIndex, OppositeSecondIndex, OppositePathStep,
+        OuterContour.Count) and
+      IsVertexOnCurvePath(((X div CURVE_SAMPLES_PER_SEGMENT) + 1) mod
+        OuterContour.Count, OppositeFirstIndex, OppositeSecondIndex,
+        OppositePathStep, OuterContour.Count) then
+    begin
+      LowerBoundarySegments[AffectedRight].Point0 := OuterPolygon[X];
+      LowerBoundarySegments[AffectedRight].Point1 := OuterPolygon[Y];
+      Inc(AffectedRight);
+    end;
+  end;
+  SetLength(FixedTopSegments, AffectedLeft);
+  SetLength(LowerBoundarySegments, AffectedRight);
   if FFixedTopValid then
   begin
     FFixedTopLeft := OuterContour[UpperLeftIndex].Position;
@@ -575,10 +671,10 @@ begin
 {$IFDEF DEBUG}
   if FFixedTopValid then
     DebugLog(Format(
-      'Partial fixed anchors: left=(%.4f,%.4f) right=(%.4f,%.4f) pathStep=%d radiusRatio=%.3f.',
-      [FFixedTopLeft.X, FFixedTopLeft.Y, FFixedTopRight.X,
+      'Partial fixed edge: edge=%d first=(%.4f,%.4f) second=(%.4f,%.4f) pathStep=%d oppositeValid=%s.',
+      [Ord(FixedEdge), FFixedTopLeft.X, FFixedTopLeft.Y, FFixedTopRight.X,
        FFixedTopRight.Y, UpperPathStep,
-       PARTIAL_FIXED_ANCHOR_RADIUS_RATIO]));
+       BoolToStr(OppositeBoundaryValid, True)]));
 {$ENDIF}
   UseCenterContour := (CenterContour <> nil) and CenterContour.Closed and
     (CenterContour.Count >= 3);
@@ -592,7 +688,11 @@ begin
   GridWidth := (Width + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
   GridHeight := (Height + MASK_GRID_SIZE - 1) div MASK_GRID_SIZE + 1;
   SetLength(Mask, GridWidth * GridHeight);
-  SetLength(FixedTopGrid, GridWidth * GridHeight);
+  FixedTopGridWidth := (Width + FIXED_TOP_GRID_SIZE - 1) div
+    FIXED_TOP_GRID_SIZE + 1;
+  FixedTopGridHeight := (Height + FIXED_TOP_GRID_SIZE - 1) div
+    FIXED_TOP_GRID_SIZE + 1;
+  SetLength(FixedTopGrid, FixedTopGridWidth * FixedTopGridHeight);
   AffectedLeft := Width;
   AffectedTop := Height;
   AffectedRight := -1;
@@ -620,11 +720,15 @@ begin
           Min(GridX * MASK_GRID_SIZE, Width - 1) / Max(1, Width - 1),
           1 - Min(GridY * MASK_GRID_SIZE, Height - 1) /
           Max(1, Height - 1), Aspect);
-      FixedTopGrid[GridY * GridWidth + GridX] := FixedTopBlendAt(
-        Min(GridX * MASK_GRID_SIZE, Width - 1) / Max(1, Width - 1),
-        1 - Min(GridY * MASK_GRID_SIZE, Height - 1) /
-        Max(1, Height - 1));
     end;
+  for FixedTopGridY := 0 to FixedTopGridHeight - 1 do
+    for FixedTopGridX := 0 to FixedTopGridWidth - 1 do
+      FixedTopGrid[FixedTopGridY * FixedTopGridWidth + FixedTopGridX] :=
+        FixedTopBlendAt(
+          Min(FixedTopGridX * FIXED_TOP_GRID_SIZE, Width - 1) /
+          Max(1, Width - 1),
+          1 - Min(FixedTopGridY * FIXED_TOP_GRID_SIZE, Height - 1) /
+          Max(1, Height - 1));
   FWidth := Width;
   FHeight := Height;
   SetLength(FCoverage, FWidth * FHeight);
@@ -633,7 +737,8 @@ begin
   for Y := 0 to FHeight - 1 do
     for X := 0 to FWidth - 1 do
     begin
-      Weight := InterpolatedMask(Mask, GridWidth, GridHeight, X, Y);
+      Weight := InterpolatedMask(Mask, GridWidth, GridHeight,
+        MASK_GRID_SIZE, X, Y);
       NormalizedX := X / Max(1, FWidth - 1);
       NormalizedY := 1 - Y / Max(1, FHeight - 1);
       InsideOuter := PointInPolygon(OuterPolygon, NormalizedX, NormalizedY);
@@ -641,9 +746,38 @@ begin
         Weight := 0;
       FCoverage[Y * FWidth + X] := Ord(InsideOuter);
       FFixedTopBlend[Y * FWidth + X] := InterpolatedMask(FixedTopGrid,
-        GridWidth, GridHeight, X, Y);
+        FixedTopGridWidth, FixedTopGridHeight, FIXED_TOP_GRID_SIZE, X, Y);
       FWeights[Y * FWidth + X] := Weight;
     end;
+  { Coarse interpolation is sufficient away from the seam, but the fixed
+    boundary itself must remain exact.  Rasterize its sampled segments back
+    into the full-resolution map, including the same two-pixel anchor width
+    used by FixedTopBlendAt. }
+  for X := 0 to High(FixedTopSegments) do
+  begin
+    FixedTopStepCount := Max(1, Ceil(Max(
+      Abs(FixedTopSegments[X].Point1.X -
+        FixedTopSegments[X].Point0.X) * Max(1, FWidth - 1),
+      Abs(FixedTopSegments[X].Point1.Y -
+        FixedTopSegments[X].Point0.Y) * Max(1, FHeight - 1))));
+    for FixedTopStep := 0 to FixedTopStepCount do
+    begin
+      FixedTopPixelX := Round((FixedTopSegments[X].Point0.X +
+        (FixedTopSegments[X].Point1.X -
+        FixedTopSegments[X].Point0.X) * FixedTopStep /
+        FixedTopStepCount) * Max(1, FWidth - 1));
+      FixedTopPixelY := FHeight - 1 - Round(
+        (FixedTopSegments[X].Point0.Y +
+        (FixedTopSegments[X].Point1.Y -
+        FixedTopSegments[X].Point0.Y) * FixedTopStep /
+        FixedTopStepCount) * Max(1, FHeight - 1));
+      for Y := Max(0, FixedTopPixelY - 1) to
+        Min(FHeight - 1, FixedTopPixelY + 1) do
+        for GridX := Max(0, FixedTopPixelX - 1) to
+          Min(FWidth - 1, FixedTopPixelX + 1) do
+          FFixedTopBlend[Y * FWidth + GridX] := 0;
+    end;
+  end;
   if not IsFullFrameClothRange(OuterContour) then
   begin
     { A separable binary dilation includes outlines and antialiasing just
@@ -907,7 +1041,8 @@ begin
         NativeInt(Source.Width) * 4);
     Result := ApplyGripRgba(@PreviewSourceRgba[0],
       @PreviewDestinationRgba[0], OriginalPositions, TargetPositions,
-      Enabled, 1.0, 1.0, GRIP_PREVIEW_BACKSIDE_STRENGTH, 0.38,
+      Enabled, tbsLegacy, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0,
+      GRIP_PREVIEW_BACKSIDE_STRENGTH, 0.38,
       GRIP_PREVIEW_CAST_SHADOW_STRENGTH, 0.0, 2.0, 0.0, 0.0,
       False, False, ErrorText);
     if Result then
@@ -1142,8 +1277,11 @@ end;
 
 function TShakeDeformationMap.ApplyGripRgba(Source, Destination: Pointer;
   const OriginalPositions, TargetPositions: TShakeGripPositions;
-  const Enabled: TShakeGripEnabled; FoldStrength, LightingStrength,
-  BacksideStrength, InfluenceRadius, CastShadowStrength: Double;
+  const Enabled: TShakeGripEnabled; BillowStyle: TTurnOverBillowStyle;
+  BillowDisplacementX, BillowDisplacementY, BillowStrength,
+  GravityStrength, ShrinkRate, FoldStrength, LightingStrength,
+  BacksideStrength,
+  InfluenceRadius, CastShadowStrength: Double;
   RippleStrength, RippleCount, RipplePhase,
   RippleDirectionDegrees: Double; FullFrameMode,
   TightPartialCoverage: Boolean;
@@ -1167,6 +1305,36 @@ var
     array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
   GripPathX: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
   GripPathY: array[0..SHAKE_GRIP_POINT_COUNT - 1] of Double;
+  FlutterAmplitude: Double;
+  FlutterChaos: Double;
+  FlutterDepth: Double;
+  FlutterDepthCosineLut: TDoubleArray;
+  FlutterDepthSineLut: TDoubleArray;
+  FlutterForwardNormalLut: TDoubleArray;
+  FlutterInverseSegment: Integer;
+  FlutterInverseSource: Double;
+  FlutterLutIndex: Integer;
+  FlutterMapOffset: NativeInt;
+  FlutterNormalDisplacementLut: TDoubleArray;
+  FlutterPhase: Double;
+  FlutterTangentCosineLut: TDoubleArray;
+  FlutterTangentIndex: Integer;
+  FlutterTangentLength: Integer;
+  FlutterTangentSineLut: TDoubleArray;
+  FlutterTangentOffsetLut: TDoubleArray;
+  FlutterTangentPositionLut: TDoubleArray;
+  FlutterRawDisplacementLut: TDoubleArray;
+  FlutterRotationStep: Double;
+  FlutterSegmentLength: Double;
+  FlutterSourceIndex: Integer;
+  FlutterSourceIndex1: Integer;
+  FlutterTangentCenterOffset: Double;
+  FlutterNoiseAnchor: Integer;
+  FlutterNoiseCoordinate: Double;
+  FlutterNoiseFraction: Double;
+  FlutterNoiseNext: Double;
+  FlutterNoiseSpacing: Integer;
+  FlutterTangentNoise: Double;
   PartialAxisLengthSquared: Double;
   PartialAxisX: Double;
   PartialAxisY: Double;
@@ -1187,9 +1355,12 @@ var
   ImageHeightScale: Double;
   ImageMaximumDimension: Double;
   ImageWidthScale: Double;
+  ImageCenterX: Double;
+  ImageCenterY: Double;
   InverseRadiusSquared: Double;
   MaximumGripMotion: Double;
   MotionMargin: Integer;
+  FixedFieldEnabled: Boolean;
   RippleAngularScale: Double;
   RippleDirectionCosine: Double;
   RippleDirectionRadians: Double;
@@ -1224,6 +1395,12 @@ begin
   CastShadowStrength := EnsureRange(CastShadowStrength, 0.0, 1.0);
   ImageWidthScale := Max(1, FWidth - 1);
   ImageHeightScale := Max(1, FHeight - 1);
+  ImageCenterX := (FWidth - 1) * 0.5;
+  ImageCenterY := (FHeight - 1) * 0.5;
+  if FullFrameMode then
+    ShrinkRate := EnsureRange(ShrinkRate, 0.1, 1.0)
+  else
+    ShrinkRate := 1;
   ImageMaximumDimension := Max(FWidth, FHeight);
   RippleStrength := EnsureRange(RippleStrength, 0.0,
     ImageMaximumDimension * 2.0);
@@ -1241,14 +1418,181 @@ begin
   AverageGripDX := 0;
   AverageGripDY := 0;
   EnabledGripCount := 0;
-  MaximumGripMotion := 0;
+  MaximumGripMotion := Max(Abs(BillowDisplacementX),
+    Abs(BillowDisplacementY));
+  BillowStrength := Max(0, BillowStrength);
+  GravityStrength := Max(0, GravityStrength);
+  MaximumGripMotion := Max(MaximumGripMotion, GravityStrength);
+  FixedFieldEnabled :=
+    (BillowStyle in [tbsBend, tbsSway, tbsFlutter]) or
+    (GravityStrength > 0);
+  if BillowStyle = tbsFlutter then
+  begin
+    FlutterAmplitude := BillowStrength * 0.35 + RippleStrength * 0.20;
+    SetLength(FlutterDepthSineLut, FLUTTER_DEPTH_LUT_SIZE + 1);
+    SetLength(FlutterDepthCosineLut, FLUTTER_DEPTH_LUT_SIZE + 1);
+    for FlutterLutIndex := 0 to FLUTTER_DEPTH_LUT_SIZE do
+    begin
+      FlutterDepth := FlutterLutIndex / FLUTTER_DEPTH_LUT_SIZE;
+      FlutterPhase := RipplePhase - FlutterDepth * 2 * Pi * RippleCount;
+      FlutterDepthSineLut[FlutterLutIndex] := Sin(FlutterPhase);
+      FlutterDepthCosineLut[FlutterLutIndex] := Cos(FlutterPhase);
+    end;
+    if FFixedEdge in [tfeLeft, tfeRight] then
+      FlutterTangentLength := FHeight
+    else
+      FlutterTangentLength := FWidth;
+    SetLength(FlutterTangentSineLut, FlutterTangentLength);
+    SetLength(FlutterTangentCosineLut, FlutterTangentLength);
+    { Larger motion needs a longer correlation distance to prevent adjacent
+      one-pixel strips from tearing the free edge into a sawtooth. }
+    FlutterNoiseSpacing := Min(Max(1, FlutterTangentLength - 1),
+      Max(24, Round(Sqrt(Max(1.0, FlutterAmplitude)) * 5)));
+    for FlutterTangentIndex := 0 to FlutterTangentLength - 1 do
+    begin
+      { Stable random anchors are smoothly interpolated across one-pixel
+        strips.  SmoothStep gives zero slope at each anchor, preserving an
+        irregular shape without discontinuities at the free edge. }
+      FlutterNoiseCoordinate := FlutterTangentIndex / FlutterNoiseSpacing;
+      FlutterNoiseAnchor := Floor(FlutterNoiseCoordinate);
+      FlutterNoiseFraction := Frac(FlutterNoiseCoordinate);
+      FlutterNoiseFraction := Sqr(FlutterNoiseFraction) *
+        (3 - 2 * FlutterNoiseFraction);
+      FlutterTangentNoise := Frac((FlutterNoiseAnchor + 1) *
+        0.7548776662466927 + Sqr((FlutterNoiseAnchor + 1) *
+        0.137873));
+      FlutterNoiseNext := Frac((FlutterNoiseAnchor + 2) *
+        0.7548776662466927 + Sqr((FlutterNoiseAnchor + 2) *
+        0.137873));
+      FlutterTangentNoise := FlutterTangentNoise *
+        (1 - FlutterNoiseFraction) + FlutterNoiseNext * FlutterNoiseFraction;
+      FlutterPhase := FlutterTangentIndex / Max(1,
+        FlutterTangentLength - 1) * Pi * RippleCount * 0.35 +
+        (FlutterTangentNoise - 0.5) * 0.9;
+      FlutterTangentSineLut[FlutterTangentIndex] := Sin(FlutterPhase);
+      FlutterTangentCosineLut[FlutterTangentIndex] := Cos(FlutterPhase);
+    end;
+    SetLength(FlutterNormalDisplacementLut,
+      (FLUTTER_DEPTH_LUT_SIZE + 1) * FlutterTangentLength);
+    SetLength(FlutterTangentOffsetLut,
+      (FLUTTER_DEPTH_LUT_SIZE + 1) * FlutterTangentLength);
+    SetLength(FlutterRawDisplacementLut, FlutterTangentLength);
+    SetLength(FlutterForwardNormalLut, FlutterTangentLength);
+    SetLength(FlutterTangentPositionLut, FlutterTangentLength);
+    for FlutterLutIndex := 0 to FLUTTER_DEPTH_LUT_SIZE do
+    begin
+      FlutterDepth := FlutterLutIndex / FLUTTER_DEPTH_LUT_SIZE;
+      FlutterMapOffset := NativeInt(FlutterLutIndex) * FlutterTangentLength;
+      for FlutterTangentIndex := 0 to FlutterTangentLength - 1 do
+      begin
+        FlutterChaos :=
+          FlutterDepthSineLut[FlutterLutIndex] *
+          FlutterTangentCosineLut[FlutterTangentIndex] +
+          FlutterDepthCosineLut[FlutterLutIndex] *
+          FlutterTangentSineLut[FlutterTangentIndex];
+        FlutterRawDisplacementLut[FlutterTangentIndex] :=
+          FlutterAmplitude *
+          (FlutterDepthSineLut[FlutterLutIndex] * FlutterDepth * 0.45 +
+          FlutterChaos * Sqr(FlutterDepth) * 0.55);
+      end;
+      FlutterForwardNormalLut[0] := FlutterRawDisplacementLut[0];
+      FlutterTangentPositionLut[0] := 0;
+      for FlutterTangentIndex := 1 to FlutterTangentLength - 1 do
+      begin
+        { Rotate the original one-pixel tangent vector instead of translating
+          neighboring strips independently.  Its normal component is capped;
+          the tangent component completes a vector whose length is exactly 1. }
+        FlutterRotationStep := EnsureRange(
+          FlutterRawDisplacementLut[FlutterTangentIndex] -
+          FlutterRawDisplacementLut[FlutterTangentIndex - 1],
+          -FLUTTER_MAX_NORMAL_STEP, FLUTTER_MAX_NORMAL_STEP);
+        FlutterForwardNormalLut[FlutterTangentIndex] :=
+          FlutterForwardNormalLut[FlutterTangentIndex - 1] +
+          FlutterRotationStep;
+        FlutterTangentPositionLut[FlutterTangentIndex] :=
+          FlutterTangentPositionLut[FlutterTangentIndex - 1] +
+          Sqrt(Max(0.0, 1 - Sqr(FlutterRotationStep)));
+      end;
+      FlutterTangentCenterOffset :=
+        (FlutterTangentLength - 1 -
+        FlutterTangentPositionLut[FlutterTangentLength - 1]) * 0.5;
+      for FlutterTangentIndex := 0 to FlutterTangentLength - 1 do
+        FlutterTangentPositionLut[FlutterTangentIndex] :=
+          FlutterTangentPositionLut[FlutterTangentIndex] +
+          FlutterTangentCenterOffset;
+      if FlutterTangentLength = 1 then
+      begin
+        FlutterNormalDisplacementLut[FlutterMapOffset] :=
+          FlutterForwardNormalLut[0];
+        FlutterTangentOffsetLut[FlutterMapOffset] := 0;
+      end
+      else
+      begin
+        FlutterInverseSegment := 0;
+        for FlutterTangentIndex := 0 to FlutterTangentLength - 1 do
+        begin
+          if FlutterTangentIndex <= FlutterTangentPositionLut[0] then
+          begin
+            FlutterSegmentLength := Max(1.0E-9,
+              FlutterTangentPositionLut[1] -
+              FlutterTangentPositionLut[0]);
+            FlutterInverseSource := (FlutterTangentIndex -
+              FlutterTangentPositionLut[0]) / FlutterSegmentLength;
+          end
+          else if FlutterTangentIndex >=
+            FlutterTangentPositionLut[FlutterTangentLength - 1] then
+          begin
+            FlutterSegmentLength := Max(1.0E-9,
+              FlutterTangentPositionLut[FlutterTangentLength - 1] -
+              FlutterTangentPositionLut[FlutterTangentLength - 2]);
+            FlutterInverseSource := FlutterTangentLength - 1 +
+              (FlutterTangentIndex -
+              FlutterTangentPositionLut[FlutterTangentLength - 1]) /
+              FlutterSegmentLength;
+          end
+          else
+          begin
+            while (FlutterInverseSegment < FlutterTangentLength - 2) and
+              (FlutterTangentPositionLut[FlutterInverseSegment + 1] <
+              FlutterTangentIndex) do
+              Inc(FlutterInverseSegment);
+            FlutterSegmentLength := Max(1.0E-9,
+              FlutterTangentPositionLut[FlutterInverseSegment + 1] -
+              FlutterTangentPositionLut[FlutterInverseSegment]);
+            FlutterInverseSource := FlutterInverseSegment +
+              (FlutterTangentIndex -
+              FlutterTangentPositionLut[FlutterInverseSegment]) /
+              FlutterSegmentLength;
+          end;
+          FlutterTangentOffsetLut[FlutterMapOffset +
+            FlutterTangentIndex] :=
+            FlutterTangentIndex - FlutterInverseSource;
+          FlutterSourceIndex := EnsureRange(Trunc(FlutterInverseSource),
+            0, FlutterTangentLength - 1);
+          FlutterSourceIndex1 := Min(FlutterSourceIndex + 1,
+            FlutterTangentLength - 1);
+          FlutterNoiseFraction := EnsureRange(FlutterInverseSource -
+            FlutterSourceIndex, 0.0, 1.0);
+          FlutterNormalDisplacementLut[FlutterMapOffset +
+            FlutterTangentIndex] :=
+            FlutterForwardNormalLut[FlutterSourceIndex] *
+            (1 - FlutterNoiseFraction) +
+            FlutterForwardNormalLut[FlutterSourceIndex1] *
+            FlutterNoiseFraction;
+        end;
+      end;
+    end;
+    MaximumGripMotion := Max(MaximumGripMotion, FlutterAmplitude);
+  end;
   for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
     if Enabled[GripIndex] then
     begin
-      GripOriginX[GripIndex] := OriginalPositions[GripIndex].X *
-        ImageWidthScale;
-      GripOriginY[GripIndex] := OriginalPositions[GripIndex].Y *
-        ImageHeightScale;
+      GripOriginX[GripIndex] := ImageCenterX +
+        (OriginalPositions[GripIndex].X * ImageWidthScale -
+        ImageCenterX) * ShrinkRate;
+      GripOriginY[GripIndex] := ImageCenterY +
+        (OriginalPositions[GripIndex].Y * ImageHeightScale -
+        ImageCenterY) * ShrinkRate;
       GripPathX[GripIndex] := (TargetPositions[GripIndex].X -
         OriginalPositions[GripIndex].X) * ImageWidthScale;
       GripPathY[GripIndex] := (TargetPositions[GripIndex].Y -
@@ -1399,6 +1743,7 @@ begin
     var
       BacksideGray: Double;
       BacksideWeight: Double;
+      BoundarySample: Boolean;
       Channel: Integer;
       DestinationOffset: NativeInt;
       DistanceSquared: Double;
@@ -1425,6 +1770,16 @@ begin
       PathOffsetX: Double;
       PathOffsetY: Double;
       PartialAnchorBlend: Double;
+      BillowBlend: Double;
+      FlutterDepthFraction: Double;
+      FlutterDepthPosition: Double;
+      FlutterDisplacement: Double;
+      FlutterIndex: Integer;
+      FlutterIndex1: Integer;
+      FlutterMapOffset0: NativeInt;
+      FlutterMapOffset1: NativeInt;
+      FlutterTangentOffset: Double;
+      FlutterTangentPixel: Integer;
       PixelOffset00: NativeInt;
       PixelOffset01: NativeInt;
       PixelOffset10: NativeInt;
@@ -1453,8 +1808,16 @@ begin
       X1: Integer;
       Y0: Integer;
       Y1: Integer;
+      function SourceChannelAt(SourceX, SourceY, SourceChannel: Integer): Double;
+      begin
+        if (SourceX < 0) or (SourceX >= FWidth) or
+          (SourceY < 0) or (SourceY >= FHeight) then
+          Exit(0);
+        Result := SourceBytes^[(NativeInt(SourceY) * FWidth + SourceX) * 4 +
+          SourceChannel];
+      end;
     begin
-    if RippleStrength > 0 then
+    if (RippleStrength > 0) and (BillowStyle <> tbsFlutter) then
     begin
       RippleSine := Sin((XStart * RippleDirectionCosine +
         Y * RippleDirectionSine) * RippleAngularScale - RipplePhase);
@@ -1463,12 +1826,15 @@ begin
     end;
     for X := XStart to XEnd do
     begin
-      if FullFrameMode then
+      if FixedFieldEnabled then
+        PartialAnchorBlend := FFixedTopBlend[
+          (FHeight - 1 - Y) * FWidth + X]
+      else if FullFrameMode then
         PartialAnchorBlend := 1
       else
         PartialAnchorBlend := FFixedTopBlend[
           (FHeight - 1 - Y) * FWidth + X];
-      if RippleStrength > 0 then
+      if (RippleStrength > 0) and (BillowStyle <> tbsFlutter) then
       begin
         Ripple := RippleSine;
         NextRippleSine := RippleSine * RippleStepCosine +
@@ -1524,7 +1890,13 @@ begin
       begin
         if RippleStrength <= 0 then
         begin
-          if FullFrameMode then
+          if FullFrameMode and SameValue(ShrinkRate, 1, 1.0E-9) and
+            SameValue(GravityStrength, 0, 1.0E-9) and
+            ((not (BillowStyle in [tbsBend, tbsSway, tbsFlutter])) or
+            (SameValue(BillowDisplacementX, 0, 1.0E-9) and
+            SameValue(BillowDisplacementY, 0, 1.0E-9) and
+            ((BillowStyle <> tbsFlutter) or
+            SameValue(BillowStrength, 0, 1.0E-9)))) then
           begin
             DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
             PCardinal(@DestinationBytes^[DestinationOffset])^ :=
@@ -1571,9 +1943,11 @@ begin
           GRIP_LIFT_LIGHT_GAIN * Sqr(Influence) * MaskWeight *
           LightingStrength;
       end;
-      if RippleStrength > 0 then
+      if (RippleStrength > 0) and (BillowStyle <> tbsFlutter) then
       begin
         Ripple := Ripple * RippleStrength * MaskWeight;
+        if BillowStyle in [tbsBend, tbsSway, tbsFlutter] then
+          Ripple := Ripple * PartialAnchorBlend;
         DX := DX - RippleDirectionSine * Ripple;
         DY := DY + RippleDirectionCosine * Ripple;
       end;
@@ -1590,7 +1964,7 @@ begin
           PartialInverse12 * (Y - PartialBY);
         SampleY := PartialInverse21 * (X - PartialBX) +
           PartialInverse22 * (Y - PartialBY);
-        if RippleStrength > 0 then
+        if (RippleStrength > 0) and (BillowStyle <> tbsFlutter) then
         begin
           SampleX := SampleX + RippleDirectionSine * Ripple;
           SampleY := SampleY - RippleDirectionCosine * Ripple;
@@ -1598,14 +1972,95 @@ begin
         SampleX := X + (SampleX - X) * PartialAnchorBlend;
         SampleY := Y + (SampleY - Y) * PartialAnchorBlend;
       end;
-      DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
-      if FullFrameMode and ((SampleX < 0) or (SampleX > FWidth - 1) or
-        (SampleY < 0) or (SampleY > FHeight - 1)) then
+      if BillowStyle in [tbsBend, tbsSway, tbsFlutter] then
       begin
-        OutsideDistance := Max(Max(-SampleX, SampleX - (FWidth - 1)),
-          Max(-SampleY, SampleY - (FHeight - 1)));
-        ShadowAlpha := EnsureRange(Round(255 * CastShadowStrength *
-          Exp(-OutsideDistance / ShadowRadius)), 0, 255);
+        if BillowStyle = tbsBend then
+          BillowBlend := Sqr(PartialAnchorBlend)
+        else
+          BillowBlend := PartialAnchorBlend * (2 - PartialAnchorBlend);
+        { Automatic billow is independent from manual grip deformation.
+          Bend concentrates movement near the free edge, while sway uses an
+          ease-out curve so most of the hanging cloth follows the motion. }
+        SampleX := SampleX - BillowDisplacementX *
+          BillowBlend;
+        SampleY := SampleY - BillowDisplacementY *
+          BillowBlend;
+        if BillowStyle = tbsFlutter then
+        begin
+          FlutterDepthPosition := EnsureRange(PartialAnchorBlend, 0.0, 1.0) *
+            FLUTTER_DEPTH_LUT_SIZE;
+          FlutterIndex := Trunc(FlutterDepthPosition);
+          FlutterIndex1 := Min(FlutterIndex + 1, FLUTTER_DEPTH_LUT_SIZE);
+          FlutterDepthFraction := FlutterDepthPosition - FlutterIndex;
+          if FFixedEdge in [tfeLeft, tfeRight] then
+            FlutterTangentPixel := Y
+          else
+            FlutterTangentPixel := X;
+          FlutterMapOffset0 := NativeInt(FlutterIndex) *
+            FlutterTangentLength + FlutterTangentPixel;
+          FlutterMapOffset1 := NativeInt(FlutterIndex1) *
+            FlutterTangentLength + FlutterTangentPixel;
+          FlutterDisplacement :=
+            FlutterNormalDisplacementLut[FlutterMapOffset0] *
+            (1 - FlutterDepthFraction) +
+            FlutterNormalDisplacementLut[FlutterMapOffset1] *
+            FlutterDepthFraction;
+          FlutterTangentOffset :=
+            FlutterTangentOffsetLut[FlutterMapOffset0] *
+            (1 - FlutterDepthFraction) +
+            FlutterTangentOffsetLut[FlutterMapOffset1] *
+            FlutterDepthFraction;
+          case FFixedEdge of
+            tfeTop:
+              begin
+                SampleX := SampleX - FlutterTangentOffset;
+                SampleY := SampleY - FlutterDisplacement;
+              end;
+            tfeBottom:
+              begin
+                SampleX := SampleX - FlutterTangentOffset;
+                SampleY := SampleY + FlutterDisplacement;
+              end;
+            tfeLeft:
+              begin
+                SampleX := SampleX - FlutterDisplacement;
+                SampleY := SampleY - FlutterTangentOffset;
+              end;
+            tfeRight:
+              begin
+                SampleX := SampleX + FlutterDisplacement;
+                SampleY := SampleY - FlutterTangentOffset;
+              end;
+          end;
+        end;
+      end;
+      if GravityStrength > 0 then
+        SampleY := SampleY - GravityStrength * Sqr(PartialAnchorBlend);
+      DestinationOffset := (NativeInt(Y) * FWidth + X) * 4;
+      if FullFrameMode and not SameValue(ShrinkRate, 1, 1.0E-9) then
+      begin
+        { Model the pre-deformation shrink in the inverse lookup so source
+          pixels are resampled only once.  Grip origins use the same centered
+          scale above, while their pixel offsets retain their configured
+          movement distance. }
+        SampleX := ImageCenterX + (SampleX - ImageCenterX) / ShrinkRate;
+        SampleY := ImageCenterY + (SampleY - ImageCenterY) / ShrinkRate;
+      end;
+      BoundarySample := FullFrameMode and
+        ((SampleX < 0) or (SampleX > FWidth - 1) or
+        (SampleY < 0) or (SampleY > FHeight - 1));
+      if FullFrameMode and ((SampleX <= -1) or (SampleX >= FWidth) or
+        (SampleY <= -1) or (SampleY >= FHeight)) then
+      begin
+        if not SameValue(ShrinkRate, 1, 1.0E-9) then
+          ShadowAlpha := 0
+        else
+        begin
+          OutsideDistance := Max(Max(-SampleX, SampleX - (FWidth - 1)),
+            Max(-SampleY, SampleY - (FHeight - 1)));
+          ShadowAlpha := EnsureRange(Round(255 * CastShadowStrength *
+            Exp(-OutsideDistance / ShadowRadius)), 0, 255);
+        end;
         for Channel := 0 to 2 do
           DestinationBytes^[DestinationOffset + Channel] := 0;
         DestinationBytes^[DestinationOffset + 3] := ShadowAlpha;
@@ -1654,25 +2109,43 @@ begin
         LiftLight := 1 + (LiftLight - 1) * MaskWeight *
           PartialAnchorBlend;
       end;
-      SampleX := EnsureRange(SampleX, 0.0, FWidth - 1.0);
-      SampleY := EnsureRange(SampleY, 0.0, FHeight - 1.0);
-      X0 := Trunc(SampleX);
-      Y0 := Trunc(SampleY);
-      X1 := Min(X0 + 1, FWidth - 1);
-      Y1 := Min(Y0 + 1, FHeight - 1);
-      FX := SampleX - X0;
-      FY := SampleY - Y0;
-      PixelOffset00 := (NativeInt(Y0) * FWidth + X0) * 4;
-      PixelOffset01 := (NativeInt(Y0) * FWidth + X1) * 4;
-      PixelOffset10 := (NativeInt(Y1) * FWidth + X0) * 4;
-      PixelOffset11 := (NativeInt(Y1) * FWidth + X1) * 4;
-      for Channel := 0 to 3 do
+      if BoundarySample then
       begin
-        Value := (SourceBytes^[PixelOffset00 + Channel] * (1 - FX) +
-          SourceBytes^[PixelOffset01 + Channel] * FX) * (1 - FY) +
-          (SourceBytes^[PixelOffset10 + Channel] * (1 - FX) +
-          SourceBytes^[PixelOffset11 + Channel] * FX) * FY;
-        SampledChannels[Channel] := Value;
+        X0 := Floor(SampleX);
+        Y0 := Floor(SampleY);
+        X1 := X0 + 1;
+        Y1 := Y0 + 1;
+        FX := SampleX - X0;
+        FY := SampleY - Y0;
+        for Channel := 0 to 3 do
+          SampledChannels[Channel] :=
+            (SourceChannelAt(X0, Y0, Channel) * (1 - FX) +
+            SourceChannelAt(X1, Y0, Channel) * FX) * (1 - FY) +
+            (SourceChannelAt(X0, Y1, Channel) * (1 - FX) +
+            SourceChannelAt(X1, Y1, Channel) * FX) * FY;
+      end
+      else
+      begin
+        SampleX := EnsureRange(SampleX, 0.0, FWidth - 1.0);
+        SampleY := EnsureRange(SampleY, 0.0, FHeight - 1.0);
+        X0 := Trunc(SampleX);
+        Y0 := Trunc(SampleY);
+        X1 := Min(X0 + 1, FWidth - 1);
+        Y1 := Min(Y0 + 1, FHeight - 1);
+        FX := SampleX - X0;
+        FY := SampleY - Y0;
+        PixelOffset00 := (NativeInt(Y0) * FWidth + X0) * 4;
+        PixelOffset01 := (NativeInt(Y0) * FWidth + X1) * 4;
+        PixelOffset10 := (NativeInt(Y1) * FWidth + X0) * 4;
+        PixelOffset11 := (NativeInt(Y1) * FWidth + X1) * 4;
+        for Channel := 0 to 3 do
+        begin
+          Value := (SourceBytes^[PixelOffset00 + Channel] * (1 - FX) +
+            SourceBytes^[PixelOffset01 + Channel] * FX) * (1 - FY) +
+            (SourceBytes^[PixelOffset10 + Channel] * (1 - FX) +
+            SourceBytes^[PixelOffset11 + Channel] * FX) * FY;
+          SampledChannels[Channel] := Value;
+        end;
       end;
       BacksideGray := (SampledChannels[0] + SampledChannels[1] +
         SampledChannels[2]) / 3;
@@ -1704,6 +2177,14 @@ begin
 end;
 
 {$IFDEF DEBUG}
+function TShakeDeformationMap.DebugFixedTopBlendAt(X, Y: Integer): Double;
+begin
+  if (X < 0) or (X >= FWidth) or (Y < 0) or (Y >= FHeight) or
+    (Length(FFixedTopBlend) <> FWidth * FHeight) then
+    Exit(1);
+  Result := FFixedTopBlend[(FHeight - 1 - Y) * FWidth + X];
+end;
+
 procedure TShakeDeformationMap.SaveDebugCoverageBitmap(
   const FileName: string; TightPartialCoverage: Boolean);
 var

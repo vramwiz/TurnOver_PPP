@@ -19,13 +19,21 @@ uses
 
 type
   TFormShakeSettings = class(TForm)
+    BillowStyleComboBox: TComboBox;
+    BillowStyleLabel: TLabel;
+    FixedEdgeComboBox: TComboBox;
+    FixedEdgeLabel: TLabel;
     PreviewPaintBox: TPaintBox;
     StatusLabel: TLabel;
     TopPanel: TPanel;
+    procedure ClothSettingChange(Sender: TObject);
+    procedure ClothSettingComboDrawItem(Control: TWinControl;
+      Index: Integer; Rect: TRect; State: TOwnerDrawState);
     procedure FormCreate(Sender: TObject);
     procedure FormDestroy(Sender: TObject);
     procedure FormMouseWheel(Sender: TObject; Shift: TShiftState;
       WheelDelta: Integer; MousePos: TPoint; var Handled: Boolean);
+    procedure FormResize(Sender: TObject);
     procedure PreviewPaintBoxDblClick(Sender: TObject);
     procedure PreviewPaintBoxMouseDown(Sender: TObject;
       Button: TMouseButton; Shift: TShiftState; X, Y: Integer);
@@ -41,6 +49,7 @@ type
     FDeformationMap: TShakeDeformationMap;
     FDeformedDirty: Boolean;
     FCurrentVertexKind: TShakeVertexKind;
+    FClothSettings: TTurnOverClothSettings;
     FDragging: Boolean;
     FDragOrigin: TPoint;
     FFitToWindow: Boolean;
@@ -95,6 +104,7 @@ type
     function HitTestVertex(X, Y: Integer): Integer;
     function NormalizedToCanvas(const Position: TPointF): TPoint;
     procedure MarkDeformationDirty;
+    procedure LayoutTopPanel;
     procedure AdjustGripAssignmentsAfterDelete(VertexIndex: Integer);
     procedure AdjustGripAssignmentsAfterInsert(VertexIndex: Integer);
     procedure AssignGripPoint(GripIndex, VertexIndex: Integer);
@@ -103,6 +113,7 @@ type
     procedure MotionTimerTick(Sender: TObject);
     procedure ResetGripPreviewPositions;
     procedure ResetMotionPreview;
+    procedure SyncClothSettingControls;
     procedure UpdateToolbarSelection;
     function UpdateDeformedPreview: Boolean;
     function UpdateGripPreview: Boolean;
@@ -126,12 +137,14 @@ uses
   Shake_PPP_CurveRenderer,
   Shake_PPP_DebugLog,
   Winapi.DwmApi,
+  Winapi.UxTheme,
   Winapi.Windows;
 
 {$R *.dfm}
 
 type
   TControlAccess = class(TControl);
+  TComboBoxAccess = class(TComboBox);
 
 procedure TFormShakeSettings.ApplyDarkTheme;
 const
@@ -149,6 +162,14 @@ begin
   TopPanel.Color := DARK_PANEL;
   TopPanel.Font.Color := DARK_TEXT;
   StatusLabel.Font.Color := DARK_TEXT;
+  BillowStyleLabel.Font.Color := DARK_TEXT;
+  FixedEdgeLabel.Font.Color := DARK_TEXT;
+  BillowStyleComboBox.Color := DARK_PANEL;
+  BillowStyleComboBox.Font.Color := DARK_TEXT;
+  FixedEdgeComboBox.Color := DARK_PANEL;
+  FixedEdgeComboBox.Font.Color := DARK_TEXT;
+  SetWindowTheme(BillowStyleComboBox.Handle, 'DarkMode_CFD', nil);
+  SetWindowTheme(FixedEdgeComboBox.Handle, 'DarkMode_CFD', nil);
   Enabled := True;
   if DwmSetWindowAttribute(Handle, DWMWA_USE_IMMERSIVE_DARK_MODE,
     @Enabled, SizeOf(Enabled)) <> S_OK then
@@ -159,6 +180,86 @@ end;
 function TFormShakeSettings.ActiveCurve: TShakeCurve;
 begin
   Result := FOuterContour;
+end;
+
+procedure TFormShakeSettings.ClothSettingComboDrawItem(
+  Control: TWinControl; Index: Integer; Rect: TRect;
+  State: TOwnerDrawState);
+const
+  COMBO_BACKGROUND = TColor($00262626);
+  COMBO_SELECTED = TColor($00523B24);
+  COMBO_TEXT = TColor($00E6E6E6);
+var
+  ComboBox: TComboBoxAccess;
+  TextRect: TRect;
+begin
+  ComboBox := TComboBoxAccess(Control);
+  ComboBox.Canvas.Font.Assign(ComboBox.Font);
+  ComboBox.Canvas.Font.Color := COMBO_TEXT;
+  if odSelected in State then
+    ComboBox.Canvas.Brush.Color := COMBO_SELECTED
+  else
+    ComboBox.Canvas.Brush.Color := COMBO_BACKGROUND;
+  ComboBox.Canvas.FillRect(Rect);
+  if (Index < 0) or (Index >= ComboBox.Items.Count) then
+    Exit;
+  TextRect := Rect;
+  Inc(TextRect.Left, MulDiv(6, CurrentPPI, 96));
+  DrawText(ComboBox.Canvas.Handle, PChar(ComboBox.Items[Index]), -1,
+    TextRect, DT_LEFT or DT_SINGLELINE or DT_VCENTER or DT_NOPREFIX);
+end;
+
+procedure TFormShakeSettings.LayoutTopPanel;
+var
+  ComboHeight: Integer;
+  FirstRowHeight: Integer;
+  FixedComboWidth: Integer;
+  FixedLabelWidth: Integer;
+  Gap: Integer;
+  LabelGap: Integer;
+  Margin: Integer;
+  StatusHeight: Integer;
+  StyleComboWidth: Integer;
+  StyleLabelWidth: Integer;
+  X: Integer;
+begin
+  if FToolbar = nil then
+    Exit;
+  Margin := MulDiv(8, CurrentPPI, 96);
+  Gap := MulDiv(16, CurrentPPI, 96);
+  LabelGap := MulDiv(6, CurrentPPI, 96);
+  FBackBuffer.Canvas.Font.Assign(Font);
+  BillowStyleComboBox.ItemHeight := Max(MulDiv(18, CurrentPPI, 96),
+    FBackBuffer.Canvas.TextHeight('Hg') + MulDiv(4, CurrentPPI, 96));
+  FixedEdgeComboBox.ItemHeight := BillowStyleComboBox.ItemHeight;
+  ComboHeight := BillowStyleComboBox.ItemHeight + MulDiv(8, CurrentPPI, 96);
+  StyleLabelWidth := FBackBuffer.Canvas.TextWidth(BillowStyleLabel.Caption);
+  FixedLabelWidth := FBackBuffer.Canvas.TextWidth(FixedEdgeLabel.Caption);
+  StyleComboWidth := FBackBuffer.Canvas.TextWidth('なびく') +
+    MulDiv(42, CurrentPPI, 96);
+  FixedComboWidth := FBackBuffer.Canvas.TextWidth('固定辺') +
+    MulDiv(42, CurrentPPI, 96);
+  X := TopPanel.ClientWidth - Margin - FixedComboWidth;
+  FixedEdgeComboBox.SetBounds(X, Margin, FixedComboWidth, ComboHeight);
+  Dec(X, LabelGap + FixedLabelWidth);
+  FixedEdgeLabel.SetBounds(X,
+    Margin + (ComboHeight - FBackBuffer.Canvas.TextHeight('Hg')) div 2,
+    FixedLabelWidth, FBackBuffer.Canvas.TextHeight('Hg'));
+  Dec(X, Gap + StyleComboWidth);
+  BillowStyleComboBox.SetBounds(X, Margin, StyleComboWidth, ComboHeight);
+  Dec(X, LabelGap + StyleLabelWidth);
+  BillowStyleLabel.SetBounds(X,
+    Margin + (ComboHeight - FBackBuffer.Canvas.TextHeight('Hg')) div 2,
+    StyleLabelWidth, FBackBuffer.Canvas.TextHeight('Hg'));
+  FirstRowHeight := Max(MulDiv(28, CurrentPPI, 96), ComboHeight);
+  FToolbar.SetBounds(Margin, Margin, MulDiv(160, CurrentPPI, 96),
+    MulDiv(28, CurrentPPI, 96));
+  StatusHeight := FBackBuffer.Canvas.TextHeight('Hg') +
+    MulDiv(4, CurrentPPI, 96);
+  StatusLabel.SetBounds(Margin, Margin + FirstRowHeight +
+    MulDiv(4, CurrentPPI, 96), Max(1, TopPanel.ClientWidth - Margin * 2),
+    StatusHeight);
+  TopPanel.Height := StatusLabel.Top + StatusHeight + Margin;
 end;
 
 function TFormShakeSettings.HitTestClosingSegment(X, Y: Integer): Boolean;
@@ -240,7 +341,20 @@ procedure TFormShakeSettings.DrawCurve(Canvas: TCanvas; Curve: TShakeCurve;
 begin
   TShakeCurveRenderer.Draw(Canvas, FBackBuffer.Width, FBackBuffer.Height,
     BackgroundDestinationRect, Curve, CurveKind, IsActive,
-    FSelectedVertex, CurrentPPI);
+    FClothSettings.FixedEdge, FSelectedVertex, CurrentPPI);
+end;
+
+procedure TFormShakeSettings.ClothSettingChange(Sender: TObject);
+begin
+  if BillowStyleComboBox.ItemIndex >= 0 then
+    FClothSettings.BillowStyle := TTurnOverBillowStyle(
+      BillowStyleComboBox.ItemIndex);
+  if FixedEdgeComboBox.ItemIndex >= 0 then
+    FClothSettings.FixedEdge := TTurnOverFixedEdge(
+      FixedEdgeComboBox.ItemIndex);
+  MarkDeformationDirty;
+  SetEditorStatus;
+  PreviewPaintBox.Invalidate;
 end;
 
 procedure TFormShakeSettings.DrawGripAssignments(Canvas: TCanvas);
@@ -507,7 +621,7 @@ begin
   if (FDeformationMap.Width <> FBackground.Width) or
     (FDeformationMap.Height <> FBackground.Height) then
     if not FDeformationMap.Build(FBackground.Width, FBackground.Height,
-      FOuterContour, nil, ErrorText) then
+      FOuterContour, nil, FClothSettings.FixedEdge, ErrorText) then
     begin
       StatusLabel.Caption := '動作プレビュー：曲線を閉じてください。';
       Exit;
@@ -611,7 +725,7 @@ begin
       (FDeformationMap.Height <> FBackground.Height) then
     begin
       if not FDeformationMap.Build(FBackground.Width, FBackground.Height,
-        FOuterContour, nil, ErrorText) then
+        FOuterContour, nil, FClothSettings.FixedEdge, ErrorText) then
       begin
         FMotionTimer.Enabled := False;
         if ErrorText = 'OUTER_NOT_CLOSED' then
@@ -679,7 +793,7 @@ begin
   HorizontalDisplacement := FBackground.Width * 0.06;
   VerticalDisplacement := -FBackground.Height * 0.035;
   Result := FDeformationMap.Build(FBackground.Width, FBackground.Height,
-    FOuterContour, nil, ErrorText);
+    FOuterContour, nil, FClothSettings.FixedEdge, ErrorText);
   if Result then
     Result := FDeformationMap.Apply(FBackground, FDeformedBackground,
       HorizontalDisplacement, VerticalDisplacement, ErrorText);
@@ -726,7 +840,7 @@ begin
     if (FDeformationMap.Width <> FBackground.Width) or
       (FDeformationMap.Height <> FBackground.Height) then
       if not FDeformationMap.Build(FBackground.Width, FBackground.Height,
-        FOuterContour, nil, ErrorText) then
+        FOuterContour, nil, FClothSettings.FixedEdge, ErrorText) then
       begin
         if ErrorText = 'NO_IMAGE' then
           ErrorText := 'プレビュー画像がありません。'
@@ -835,6 +949,9 @@ procedure TFormShakeSettings.FormCreate(Sender: TObject);
 var
   I: Integer;
 begin
+  Font.Name := 'Segoe UI';
+  Font.Height := -MulDiv(12, CurrentPPI, 96);
+  TopPanel.Font.Assign(Font);
   ApplyDarkTheme;
   FBackground := Vcl.Graphics.TBitmap.Create;
   FBackBuffer := Vcl.Graphics.TBitmap.Create;
@@ -845,6 +962,16 @@ begin
   FMotionTimer.Interval := 50;
   FMotionTimer.OnTimer := MotionTimerTick;
   FOuterContour := TShakeCurve.Create;
+  FClothSettings := DefaultTurnOverClothSettings;
+  BillowStyleComboBox.Items.Add('従来');
+  BillowStyleComboBox.Items.Add('しなり');
+  BillowStyleComboBox.Items.Add('揺れ');
+  BillowStyleComboBox.Items.Add('なびく');
+  FixedEdgeComboBox.Items.Add('上');
+  FixedEdgeComboBox.Items.Add('下');
+  FixedEdgeComboBox.Items.Add('左');
+  FixedEdgeComboBox.Items.Add('右');
+  SyncClothSettingControls;
   for I := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
     FGripVertexIndices[I] := -1;
   FBackBuffer.PixelFormat := pf32bit;
@@ -861,6 +988,7 @@ begin
   FSelectedVertex := -1;
   FZoomPercent := 100;
   CreateShapeToolbar;
+  LayoutTopPanel;
   SetEditorStatus;
   DebugLog('Settings form created.');
 end;
@@ -1058,6 +1186,17 @@ begin
   if FShowDeformed and not FPanMode then
     UpdateDeformedPreview;
   PreviewPaintBox.Invalidate;
+end;
+
+procedure TFormShakeSettings.FormResize(Sender: TObject);
+begin
+  LayoutTopPanel;
+end;
+
+procedure TFormShakeSettings.SyncClothSettingControls;
+begin
+  BillowStyleComboBox.ItemIndex := Ord(FClothSettings.BillowStyle);
+  FixedEdgeComboBox.ItemIndex := Ord(FClothSettings.FixedEdge);
 end;
 
 procedure TFormShakeSettings.PreviewPaintBoxMouseMove(Sender: TObject;
@@ -1317,9 +1456,10 @@ function TFormShakeSettings.TryLoadCurveDataText(const Text: string;
   out ErrorText: string): Boolean;
 begin
   Result := TryDecodeTurnOverCurveData(Text, FOuterContour,
-    FGripVertexIndices, ErrorText);
+    FGripVertexIndices, FClothSettings, ErrorText);
   if Result then
   begin
+    SyncClothSettingControls;
     FSelectedVertex := -1;
     MarkDeformationDirty;
     SetEditorStatus;
@@ -1331,7 +1471,7 @@ function TFormShakeSettings.TrySaveCurveDataText(
   out Text, ErrorText: string): Boolean;
 begin
   Result := TryEncodeTurnOverCurveData(FOuterContour,
-    FGripVertexIndices, Text, ErrorText);
+    FGripVertexIndices, FClothSettings, Text, ErrorText);
 end;
 
 end.

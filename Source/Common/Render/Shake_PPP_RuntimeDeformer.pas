@@ -32,6 +32,7 @@ type
   TTurnOverObjectState = class
   private
     FCurveDataText: string;
+    FClothSettings: TTurnOverClothSettings;
     FFullFrameMode: Boolean;
     FGripVertexIndices: TShakeGripPointVertexIndices;
     FHeight: Integer;
@@ -57,6 +58,9 @@ var
   RuntimeInitialized: Boolean;
   RuntimeLock: TRTLCriticalSection;
   RuntimeStates: TObjectDictionary<Int64, TTurnOverObjectState>;
+{$IFDEF DEBUG}
+  RuntimeDebugImageDumpsEnabled: Boolean;
+{$ENDIF}
 
 constructor TTurnOverObjectState.Create;
 var
@@ -64,6 +68,7 @@ var
 begin
   inherited;
   FOuterContour := TShakeCurve.Create;
+  FClothSettings := DefaultTurnOverClothSettings;
   FMap := TShakeDeformationMap.Create;
 {$IFDEF DEBUG}
   FLastDebugDumpFrame := Low(Integer);
@@ -133,12 +138,13 @@ begin
   FFullFrameMode := False;
   FMap.Clear;
   if not TryDecodeTurnOverCurveData(CurveDataText, FOuterContour,
-    FGripVertexIndices, ErrorText) then
+    FGripVertexIndices, FClothSettings, ErrorText) then
   begin
     DebugLog('Runtime cloth data rejected: ' + ErrorText);
     Exit(False);
   end;
-  FMapReady := FMap.Build(Width, Height, FOuterContour, nil, ErrorText);
+  FMapReady := FMap.Build(Width, Height, FOuterContour, nil,
+    FClothSettings.FixedEdge, ErrorText);
   FFullFrameMode := FMapReady and IsFullFrameClothRange(FOuterContour);
   if not FMapReady and (ErrorText <> 'OUTER_NOT_CLOSED') then
     DebugLog('Runtime cloth range rejected: ' + ErrorText);
@@ -148,7 +154,11 @@ end;
 procedure TTurnOverObjectState.Apply(Video: PFILTER_PROC_VIDEO;
   const CurveDataText: string; const Settings: TTurnOverRuntimeSettings);
 var
+  AnimationFrame: Double;
   Billow: Double;
+  BillowDisplacementX: Double;
+  BillowDisplacementY: Double;
+  GlobalBillowEnabled: Boolean;
   ByteCount: NativeInt;
   DirectionCosine: Double;
   DirectionRadians: Double;
@@ -158,6 +168,7 @@ var
   Frame: Integer;
   GripIndex: Integer;
   HasEnabledGrip: Boolean;
+  HasMotion: Boolean;
   Height: Integer;
   OriginalPositions: TShakeGripPositions;
   Phase: Double;
@@ -174,12 +185,14 @@ begin
     not Assigned(Video^.GetImageData) or
     not Assigned(Video^.SetImageData) then
     Exit;
-  if SameValue(Settings.GripOffsets[0].X, 0, 0.0001) and
+  HasMotion := not (SameValue(Settings.GripOffsets[0].X, 0, 0.0001) and
     SameValue(Settings.GripOffsets[0].Y, 0, 0.0001) and
     SameValue(Settings.GripOffsets[1].X, 0, 0.0001) and
     SameValue(Settings.GripOffsets[1].Y, 0, 0.0001) and
     SameValue(Settings.WindStrength, 0, 0.0001) and
-    SameValue(Settings.RippleStrength, 0, 0.0001) then
+    SameValue(Settings.GravityStrength, 0, 0.0001) and
+    SameValue(Settings.RippleStrength, 0, 0.0001));
+  if not HasMotion and SameValue(Settings.ShrinkRate, 1, 0.0001) then
     Exit;
   Width := Video^.Object_^.Width;
   Height := Video^.Object_^.Height;
@@ -187,11 +200,49 @@ begin
     (NativeInt(Width) > High(NativeInt) div Height div 4) or
     not PrepareMap(Width, Height, CurveDataText) then
     Exit;
+  if not HasMotion and
+    (not FFullFrameMode or SameValue(Settings.ShrinkRate, 1, 0.0001)) then
+    Exit;
   Frame := AviUtl2GetVideoFrame(Video);
+  AnimationFrame := Frame * EnsureRange(Settings.AnimationSpeed, 0.0, 4.0);
   DirectionRadians := DegToRad(Settings.WindDirectionDegrees);
   DirectionCosine := Cos(DirectionRadians);
   DirectionSine := Sin(DirectionRadians);
   Turbulence := EnsureRange(Settings.WindTurbulence, 0.0, 1.0);
+  GlobalBillowEnabled :=
+    (FClothSettings.BillowStyle in [tbsBend, tbsSway, tbsFlutter]) and
+    ((Settings.WindStrength > 0) or
+    ((FClothSettings.BillowStyle = tbsFlutter) and
+    (Settings.RippleStrength > 0)));
+  BillowDisplacementX := 0;
+  BillowDisplacementY := 0;
+  if GlobalBillowEnabled then
+  begin
+    Phase := 2 * Pi * AnimationFrame / Max(1.0, Settings.WindPeriod);
+    Wave := Sin(Phase) + Sin(Phase * 2.17) * 0.25 * Turbulence;
+    Billow := (1 - Cos(Phase)) * 0.25 +
+      (1 - Cos(Phase * 1.73)) * 0.06 * Turbulence;
+    if FClothSettings.BillowStyle = tbsFlutter then
+    begin
+      { A flag receives a mostly steady push in the configured direction.
+        Its upward lift directly opposes screen-down gravity; the moving LUT
+        in the static deformer supplies the irregular travelling component. }
+      Billow := EnsureRange(0.82 + Wave * 0.10 + Billow * 0.08,
+        0.55, 1.10);
+      BillowDisplacementX := DirectionCosine * Settings.WindStrength * Billow;
+      BillowDisplacementY := DirectionSine * Settings.WindStrength * Billow -
+        Settings.WindStrength * (0.30 + 0.08 * Turbulence);
+    end
+    else
+    begin
+      BillowDisplacementX :=
+        (Wave * DirectionCosine + Billow * DirectionSine) *
+        Settings.WindStrength;
+      BillowDisplacementY :=
+        (Wave * DirectionSine - Billow * DirectionCosine) *
+        Settings.WindStrength;
+    end;
+  end;
   HasEnabledGrip := False;
   for GripIndex := 0 to SHAKE_GRIP_POINT_COUNT - 1 do
   begin
@@ -202,7 +253,7 @@ begin
     begin
       HasEnabledGrip := True;
       OriginalPositions[GripIndex] := FOuterContour[VertexIndex].Position;
-      Phase := 2 * Pi * Frame / Max(1.0, Settings.WindPeriod) +
+      Phase := 2 * Pi * AnimationFrame / Max(1.0, Settings.WindPeriod) +
         GripIndex * Pi / 5;
       Wave := Sin(Phase) + Sin(Phase * 2.17 + GripIndex * 1.37) *
         0.25 * Turbulence;
@@ -213,6 +264,11 @@ begin
         Settings.WindStrength;
       WindY := (Wave * DirectionSine - Billow * DirectionCosine) *
         Settings.WindStrength;
+      if GlobalBillowEnabled then
+      begin
+        WindX := 0;
+        WindY := 0;
+      end;
       TargetPositions[GripIndex].X := OriginalPositions[GripIndex].X +
         (Settings.GripOffsets[GripIndex].X + WindX) /
         Max(1, Width - 1);
@@ -226,20 +282,24 @@ begin
       TargetPositions[GripIndex] := PointF(0, 0);
     end;
   end;
-  if not HasEnabledGrip then
+  if not HasEnabledGrip and not GlobalBillowEnabled and
+    (Settings.GravityStrength <= 0) and
+    (not FFullFrameMode or (Settings.ShrinkRate >= 1)) then
     Exit;
   TightPartialCoverage :=
     SameValue(Settings.GripOffsets[0].X, 0, 0.0001) and
     SameValue(Settings.GripOffsets[0].Y, 0, 0.0001) and
     SameValue(Settings.GripOffsets[1].X, 0, 0.0001) and
     SameValue(Settings.GripOffsets[1].Y, 0, 0.0001) and
-    ((Settings.WindStrength > 0) or (Settings.RippleStrength > 0));
+    ((Settings.WindStrength > 0) or (Settings.GravityStrength > 0) or
+    (Settings.RippleStrength > 0));
   ByteCount := NativeInt(Width) * Height * 4;
   SetLength(FSource, ByteCount);
   SetLength(FOutput, ByteCount);
   Video^.GetImageData(PPIXEL_RGBA(@FSource[0]));
 {$IFDEF DEBUG}
-  if Frame <> FLastDebugDumpFrame then
+  if RuntimeDebugImageDumpsEnabled and
+    (Frame <> FLastDebugDumpFrame) then
     try
       SaveDebugRgbaBitmap(FSource, Width, Height,
         'C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\debug_source.bmp');
@@ -252,11 +312,13 @@ begin
     end;
 {$ENDIF}
   if not FMap.ApplyGripRgba(@FSource[0], @FOutput[0], OriginalPositions,
-    TargetPositions, Enabled, Settings.FoldStrength,
+    TargetPositions, Enabled, FClothSettings.BillowStyle,
+    BillowDisplacementX, BillowDisplacementY, Settings.WindStrength,
+    Settings.GravityStrength, Settings.ShrinkRate, Settings.FoldStrength,
     Settings.LightingStrength, Settings.BacksideStrength,
     Settings.InfluenceRadius, Settings.CastShadowStrength,
     Settings.RippleStrength, Settings.RippleCount,
-    2 * Pi * Frame / Max(1.0, Settings.WindPeriod),
+    2 * Pi * AnimationFrame / Max(1.0, Settings.WindPeriod),
     Settings.WindDirectionDegrees,
     FFullFrameMode, TightPartialCoverage, ErrorText) then
   begin
@@ -264,7 +326,8 @@ begin
     Exit;
   end;
 {$IFDEF DEBUG}
-  if Frame <> FLastDebugDumpFrame then
+  if RuntimeDebugImageDumpsEnabled and
+    (Frame <> FLastDebugDumpFrame) then
   begin
     try
       SaveDebugRgbaBitmap(FOutput, Width, Height,
@@ -286,6 +349,12 @@ procedure InitializeRuntimeDeformer;
 begin
   if RuntimeInitialized then
     Exit;
+{$IFDEF DEBUG}
+  RuntimeDebugImageDumpsEnabled := SameText(
+    GetEnvironmentVariable('TURNOVER_PPP_DEBUG_DUMP'), '1');
+  if RuntimeDebugImageDumpsEnabled then
+    DebugLog('Runtime debug image dumps enabled by TURNOVER_PPP_DEBUG_DUMP=1.');
+{$ENDIF}
   InitializeCriticalSection(RuntimeLock);
   RuntimeStates := TObjectDictionary<Int64, TTurnOverObjectState>.Create(
     [doOwnsValues]);

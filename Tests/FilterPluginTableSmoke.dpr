@@ -13,7 +13,7 @@ type
   TGetFilterPluginTable = function: PFILTER_PLUGIN_TABLE; cdecl;
 
 const
-  EXPECTED_ITEM_COUNT = 17;
+  EXPECTED_ITEM_COUNT = 20;
 
 procedure Check(Condition: Boolean; const MessageText: string);
 begin

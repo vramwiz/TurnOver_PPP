@@ -1,9 +1,9 @@
 [
   {
     "id": "VRAMWIZ.TurnOver_PPP",
-    "name": "布をめくる",
+    "name": "TurnOver_PPP（パンチラ）",
     "type": "フィルタプラグイン",
-    "summary": "布の範囲を2点でつまみ、めくり・風揺れ・波打ちを加えるフィルター",
+    "summary": "画像を2点でめくり、固定辺を基準に風・波・重力で布をなびかせるフィルター",
     "description": "https://raw.githubusercontent.com/vramwiz/TurnOver_PPP/main/README.md",
     "author": "VRAMの魔術師",
     "repoURL": "https://github.com/vramwiz/TurnOver_PPP",
@@ -18,7 +18,8 @@
     "tags": [
       "布",
       "めくり",
-      "揺れ",
+      "なびき",
+      "カーテン",
       "変形"
     ],
     "dependencies": [],

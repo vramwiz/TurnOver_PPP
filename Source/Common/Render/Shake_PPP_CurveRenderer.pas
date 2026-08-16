@@ -19,7 +19,7 @@ type
     class procedure Draw(Canvas: TCanvas; BufferWidth, BufferHeight: Integer;
       const Destination: TRect; Curve: TShakeCurve;
       CurveKind: TShakeCurveKind; IsActive: Boolean;
-      SelectedVertex, PPI: Integer); static;
+      FixedEdge: TTurnOverFixedEdge; SelectedVertex, PPI: Integer); static;
     class function HitTestClosingSegment(const Destination: TRect;
       Curve: TShakeCurve; X, Y, PPI: Integer): Boolean; static;
     class function HitTestSegment(const Destination: TRect;
@@ -80,7 +80,7 @@ end;
 class procedure TShakeCurveRenderer.Draw(Canvas: TCanvas; BufferWidth,
   BufferHeight: Integer; const Destination: TRect; Curve: TShakeCurve;
   CurveKind: TShakeCurveKind; IsActive: Boolean;
-  SelectedVertex, PPI: Integer);
+  FixedEdge: TTurnOverFixedEdge; SelectedVertex, PPI: Integer);
 var
   BaseColor: TColor;
   Control1: TPointF;
@@ -121,7 +121,7 @@ begin
   else
     UpperColor := RGB(205, 105, 25);
   UpperValid := (CurveKind = sckOuterContour) and
-    TryGetUpperBoundary(Curve, UpperLeftIndex, UpperRightIndex,
+    TryGetFixedBoundary(Curve, FixedEdge, UpperLeftIndex, UpperRightIndex,
     UpperPathStep);
   Canvas.Pen.Style := psSolid;
   if IsActive then

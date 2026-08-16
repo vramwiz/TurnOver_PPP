@@ -16,24 +16,32 @@ begin
 end;
 
 var
+  BoundaryCurve: TShakeCurve;
   Center: TShakeCurve;
+  ClothSettings: TTurnOverClothSettings;
   DecodedCenter: TShakeCurve;
+  DecodedClothSettings: TTurnOverClothSettings;
   DecodedGrips: TShakeGripVertexIndices;
   DecodedOuter: TShakeCurve;
   DecodedSets: TShakeCurveSets;
   ErrorText: string;
   I: Integer;
+  FirstBoundaryIndex: Integer;
   InvalidText: string;
   J: Integer;
   LegacyGripText: string;
+  LegacyTurnOverText: string;
   OldText: string;
   Outer: TShakeCurve;
+  BoundaryPathStep: Integer;
+  SecondBoundaryIndex: Integer;
   Grips: TShakeGripVertexIndices;
   Sets: TShakeCurveSets;
   Text: string;
   TurnOverGrips: TShakeGripPointVertexIndices;
   DecodedTurnOverGrips: TShakeGripPointVertexIndices;
 begin
+  BoundaryCurve := TShakeCurve.Create;
   Outer := TShakeCurve.Create;
   Center := TShakeCurve.Create;
   DecodedOuter := TShakeCurve.Create;
@@ -53,6 +61,28 @@ begin
     end;
   end;
   try
+    BoundaryCurve.AddVertex(PointF(0, 0), svkCorner);
+    BoundaryCurve.AddVertex(PointF(1, 0), svkCorner);
+    BoundaryCurve.AddVertex(PointF(1, 1), svkCorner);
+    BoundaryCurve.AddVertex(PointF(0, 1), svkCorner);
+    BoundaryCurve.Closed := True;
+    Require(TryGetFixedBoundary(BoundaryCurve, tfeTop,
+      FirstBoundaryIndex, SecondBoundaryIndex, BoundaryPathStep) and
+      (FirstBoundaryIndex = 0) and (SecondBoundaryIndex = 1) and
+      (BoundaryPathStep = 1), 'Top fixed boundary was detected incorrectly.');
+    Require(TryGetFixedBoundary(BoundaryCurve, tfeBottom,
+      FirstBoundaryIndex, SecondBoundaryIndex, BoundaryPathStep) and
+      (FirstBoundaryIndex = 3) and (SecondBoundaryIndex = 2) and
+      (BoundaryPathStep = -1),
+      'Bottom fixed boundary was detected incorrectly.');
+    Require(TryGetFixedBoundary(BoundaryCurve, tfeLeft,
+      FirstBoundaryIndex, SecondBoundaryIndex, BoundaryPathStep) and
+      (FirstBoundaryIndex = 0) and (SecondBoundaryIndex = 3) and
+      (BoundaryPathStep = -1), 'Left fixed boundary was detected incorrectly.');
+    Require(TryGetFixedBoundary(BoundaryCurve, tfeRight,
+      FirstBoundaryIndex, SecondBoundaryIndex, BoundaryPathStep) and
+      (FirstBoundaryIndex = 1) and (SecondBoundaryIndex = 2) and
+      (BoundaryPathStep = 1), 'Right fixed boundary was detected incorrectly.');
     Outer.AddVertex(PointF(0.1, 0.2), svkSmooth);
     Outer.AddVertex(PointF(0.8, 0.25), svkCorner);
     Outer.AddVertex(PointF(0.55, 0.9), svkSmooth);
@@ -101,24 +131,50 @@ begin
       'Malformed grip data modified the current assignments.');
     TurnOverGrips[0] := 0;
     TurnOverGrips[1] := 2;
+    ClothSettings.BillowStyle := tbsFlutter;
+    ClothSettings.FixedEdge := tfeLeft;
     DecodedTurnOverGrips[0] := -1;
     DecodedTurnOverGrips[1] := -1;
-    Require(TryEncodeTurnOverCurveData(Outer, TurnOverGrips,
+    DecodedClothSettings := DefaultTurnOverClothSettings;
+    Require(TryEncodeTurnOverCurveData(Outer, TurnOverGrips, ClothSettings,
       Text, ErrorText), ErrorText);
-    Require(Text.StartsWith('TPP1|'), 'TurnOver format prefix is invalid.');
+    Require(Text.StartsWith('TPP2|'), 'TurnOver format prefix is invalid.');
     Require(TryDecodeTurnOverCurveData(Text, DecodedOuter,
-      DecodedTurnOverGrips, ErrorText), ErrorText);
+      DecodedTurnOverGrips, DecodedClothSettings, ErrorText), ErrorText);
     Require((DecodedOuter.Count = 3) and (DecodedTurnOverGrips[0] = 0) and
       (DecodedTurnOverGrips[1] = 2), 'TurnOver data changed.');
+    Require((DecodedClothSettings.BillowStyle = tbsFlutter) and
+      (DecodedClothSettings.FixedEdge = tfeLeft),
+      'TurnOver cloth settings changed.');
+    InvalidText := StringReplace(Text, '|B,3,2', '|B,9,2', []);
+    Require(not TryDecodeTurnOverCurveData(InvalidText, DecodedOuter,
+      DecodedTurnOverGrips, DecodedClothSettings, ErrorText),
+      'Invalid TurnOver cloth settings were accepted.');
+    Require((DecodedOuter.Count = 3) and
+      (DecodedClothSettings.BillowStyle = tbsFlutter) and
+      (DecodedClothSettings.FixedEdge = tfeLeft),
+      'Invalid cloth settings modified the current data.');
     Require(TryDecodeCurveSets(Text, DecodedSets, ErrorText), ErrorText);
     Require((DecodedSets[0].OuterContour.Count = 3) and
       (DecodedSets[1].OuterContour.Count = 0),
-      'Runtime compatibility conversion for TPP1 failed.');
+      'Runtime compatibility conversion for TPP2 failed.');
+    LegacyTurnOverText := Text.Substring(0, Text.LastIndexOf('|'));
+    LegacyTurnOverText := 'TPP1' + LegacyTurnOverText.Substring(4);
+    DecodedClothSettings.BillowStyle := tbsSway;
+    DecodedClothSettings.FixedEdge := tfeRight;
+    Require(TryDecodeTurnOverCurveData(LegacyTurnOverText, DecodedOuter,
+      DecodedTurnOverGrips, DecodedClothSettings, ErrorText), ErrorText);
+    Require((DecodedClothSettings.BillowStyle = tbsLegacy) and
+      (DecodedClothSettings.FixedEdge = tfeTop),
+      'TPP1 did not receive default cloth settings.');
     Require(TryDecodeTurnOverCurveData(LegacyGripText, DecodedOuter,
-      DecodedTurnOverGrips, ErrorText), ErrorText);
+      DecodedTurnOverGrips, DecodedClothSettings, ErrorText), ErrorText);
     Require((DecodedTurnOverGrips[0] = 0) and
       (DecodedTurnOverGrips[1] = 2),
       'SPP3 to TurnOver compatibility conversion failed.');
+    Require((DecodedClothSettings.BillowStyle = tbsLegacy) and
+      (DecodedClothSettings.FixedEdge = tfeTop),
+      'SPP3 did not receive default cloth settings.');
     Require(TryDecodeCurveSets(OldText, DecodedSets, DecodedGrips,
       ErrorText), ErrorText);
     Require((DecodedSets[0].OuterContour.Count = 3) and
@@ -155,5 +211,6 @@ begin
     DecodedOuter.Free;
     Center.Free;
     Outer.Free;
+    BoundaryCurve.Free;
   end;
 end.

@@ -47,10 +47,12 @@ begin
     Exit;
   LastRuntimeInputLogTick := CurrentTick;
   DebugLog(Format(
-    'Runtime grip offsets: point1=(%.1f,%.1f) point2=(%.1f,%.1f) wind=%.1f period=%.1f direction=%.1f turbulence=%.2f ripple=%.1f waves=%.1f radius=%.2f fold=%.2f lighting=%.2f backside=%.2f castShadow=%.2f.',
+    'Runtime grip offsets: point1=(%.1f,%.1f) point2=(%.1f,%.1f) shrink=%.2f gravity=%.1f wind=%.1f period=%.1f speed=%.2f direction=%.1f turbulence=%.2f ripple=%.1f waves=%.1f radius=%.2f fold=%.2f lighting=%.2f backside=%.2f castShadow=%.2f.',
     [Settings.GripOffsets[0].X, Settings.GripOffsets[0].Y,
      Settings.GripOffsets[1].X, Settings.GripOffsets[1].Y,
-     Settings.WindStrength, Settings.WindPeriod,
+     Settings.ShrinkRate,
+     Settings.GravityStrength,
+     Settings.WindStrength, Settings.WindPeriod, Settings.AnimationSpeed,
      Settings.WindDirectionDegrees, Settings.WindTurbulence,
      Settings.RippleStrength, Settings.RippleCount,
      Settings.InfluenceRadius, Settings.FoldStrength,

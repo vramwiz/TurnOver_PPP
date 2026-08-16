@@ -9,6 +9,13 @@ uses
 type
   TShakeCurveKind = (sckOuterContour, sckCenterContour);
   TShakeVertexKind = (svkCorner, svkSmooth);
+  TTurnOverBillowStyle = (tbsLegacy, tbsBend, tbsSway, tbsFlutter);
+  TTurnOverFixedEdge = (tfeTop, tfeBottom, tfeLeft, tfeRight);
+
+  TTurnOverClothSettings = record
+    BillowStyle: TTurnOverBillowStyle;
+    FixedEdge: TTurnOverFixedEdge;
+  end;
 
   TShakeCurveVertex = record
     Position: TPointF;
@@ -57,13 +64,23 @@ type
 
 function TryGetUpperBoundary(Curve: TShakeCurve; out LeftIndex,
   RightIndex, PathStep: Integer): Boolean;
+function TryGetFixedBoundary(Curve: TShakeCurve;
+  FixedEdge: TTurnOverFixedEdge; out FirstIndex, SecondIndex,
+  PathStep: Integer): Boolean;
 function IsVertexOnCurvePath(VertexIndex, StartIndex, EndIndex,
   PathStep, VertexCount: Integer): Boolean;
+function DefaultTurnOverClothSettings: TTurnOverClothSettings;
 
 implementation
 
 uses
   System.Math;
+
+function DefaultTurnOverClothSettings: TTurnOverClothSettings;
+begin
+  Result.BillowStyle := tbsLegacy;
+  Result.FixedEdge := tfeTop;
+end;
 
 function IsVertexOnCurvePath(VertexIndex, StartIndex, EndIndex,
   PathStep, VertexCount: Integer): Boolean;
@@ -85,73 +102,124 @@ begin
   end;
 end;
 
-function TryGetUpperBoundary(Curve: TShakeCurve; out LeftIndex,
-  RightIndex, PathStep: Integer): Boolean;
+function TryGetFixedBoundary(Curve: TShakeCurve;
+  FixedEdge: TTurnOverFixedEdge; out FirstIndex, SecondIndex,
+  PathStep: Integer): Boolean;
 var
-  ForwardAverageY: Double;
+  ForwardAverageNormal: Double;
   ForwardCount: Integer;
   I: Integer;
-  MaximumY: Double;
-  MinimumY: Double;
-  ReverseAverageY: Double;
+  MaximumNormal: Double;
+  MinimumNormal: Double;
+  Normal: Double;
+  ReverseAverageNormal: Double;
   ReverseCount: Integer;
-  TopBandLimit: Double;
+  SideBandLimit: Double;
+  Tangent: Double;
   Visited: Integer;
+
+  procedure Coordinates(VertexIndex: Integer; out LocalNormal,
+    LocalTangent: Double);
+  begin
+    case FixedEdge of
+      tfeTop:
+        begin
+          LocalNormal := Curve[VertexIndex].Position.Y;
+          LocalTangent := Curve[VertexIndex].Position.X;
+        end;
+      tfeBottom:
+        begin
+          LocalNormal := 1 - Curve[VertexIndex].Position.Y;
+          LocalTangent := Curve[VertexIndex].Position.X;
+        end;
+      tfeLeft:
+        begin
+          LocalNormal := Curve[VertexIndex].Position.X;
+          LocalTangent := Curve[VertexIndex].Position.Y;
+        end;
+    else
+      LocalNormal := 1 - Curve[VertexIndex].Position.X;
+      LocalTangent := Curve[VertexIndex].Position.Y;
+    end;
+  end;
 begin
   Result := False;
-  LeftIndex := -1;
-  RightIndex := -1;
+  FirstIndex := -1;
+  SecondIndex := -1;
   PathStep := 0;
   if (Curve = nil) or not Curve.Closed or (Curve.Count < 3) then
     Exit;
-  MinimumY := 1;
-  MaximumY := 0;
+  MinimumNormal := 1;
+  MaximumNormal := 0;
   for I := 0 to Curve.Count - 1 do
   begin
-    MinimumY := Min(MinimumY, Curve[I].Position.Y);
-    MaximumY := Max(MaximumY, Curve[I].Position.Y);
+    Coordinates(I, Normal, Tangent);
+    MinimumNormal := Min(MinimumNormal, Normal);
+    MaximumNormal := Max(MaximumNormal, Normal);
   end;
-  TopBandLimit := MinimumY + (MaximumY - MinimumY) * 0.25;
+  SideBandLimit := MinimumNormal + (MaximumNormal - MinimumNormal) * 0.25;
   for I := 0 to Curve.Count - 1 do
-    if Curve[I].Position.Y <= TopBandLimit then
+  begin
+    Coordinates(I, Normal, Tangent);
+    if Normal <= SideBandLimit then
     begin
-      if (LeftIndex < 0) or
-        (Curve[I].Position.X < Curve[LeftIndex].Position.X) then
-        LeftIndex := I;
-      if (RightIndex < 0) or
-        (Curve[I].Position.X > Curve[RightIndex].Position.X) then
-        RightIndex := I;
+      if FirstIndex < 0 then
+        FirstIndex := I
+      else
+      begin
+        Coordinates(FirstIndex, Normal, MaximumNormal);
+        if Tangent < MaximumNormal then
+          FirstIndex := I;
+      end;
+      if SecondIndex < 0 then
+        SecondIndex := I
+      else
+      begin
+        Coordinates(SecondIndex, Normal, MaximumNormal);
+        if Tangent > MaximumNormal then
+          SecondIndex := I;
+      end;
     end;
-  if (LeftIndex < 0) or (RightIndex < 0) then
+  end;
+  if (FirstIndex < 0) or (SecondIndex < 0) then
     Exit;
-  ForwardAverageY := 0;
+  ForwardAverageNormal := 0;
   ForwardCount := 0;
-  I := LeftIndex;
+  I := FirstIndex;
   for Visited := 0 to Curve.Count - 1 do
   begin
-    ForwardAverageY := ForwardAverageY + Curve[I].Position.Y;
+    Coordinates(I, Normal, Tangent);
+    ForwardAverageNormal := ForwardAverageNormal + Normal;
     Inc(ForwardCount);
-    if I = RightIndex then
+    if I = SecondIndex then
       Break;
     I := (I + 1) mod Curve.Count;
   end;
-  ReverseAverageY := 0;
+  ReverseAverageNormal := 0;
   ReverseCount := 0;
-  I := LeftIndex;
+  I := FirstIndex;
   for Visited := 0 to Curve.Count - 1 do
   begin
-    ReverseAverageY := ReverseAverageY + Curve[I].Position.Y;
+    Coordinates(I, Normal, Tangent);
+    ReverseAverageNormal := ReverseAverageNormal + Normal;
     Inc(ReverseCount);
-    if I = RightIndex then
+    if I = SecondIndex then
       Break;
     I := (I - 1 + Curve.Count) mod Curve.Count;
   end;
-  if ForwardAverageY / Max(1, ForwardCount) <=
-    ReverseAverageY / Max(1, ReverseCount) then
+  if ForwardAverageNormal / Max(1, ForwardCount) <=
+    ReverseAverageNormal / Max(1, ReverseCount) then
     PathStep := 1
   else
     PathStep := -1;
   Result := True;
+end;
+
+function TryGetUpperBoundary(Curve: TShakeCurve; out LeftIndex,
+  RightIndex, PathStep: Integer): Boolean;
+begin
+  Result := TryGetFixedBoundary(Curve, tfeTop, LeftIndex, RightIndex,
+    PathStep);
 end;
 
 constructor TShakeCurve.Create;

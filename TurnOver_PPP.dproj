@@ -3,7 +3,7 @@
         <ProjectGuid>{0D4E3867-6594-4D91-9AC8-D2B32FE091FB}</ProjectGuid>
         <ProjectVersion>20.4</ProjectVersion>
         <FrameworkType>None</FrameworkType>
-        <Config Condition="'$(Config)'==''">Debug</Config>
+        <Config Condition="'$(Config)'==''">Release</Config>
         <Platform Condition="'$(Platform)'==''">Win64</Platform>
         <ProjectName Condition="'$(ProjectName)'==''">TurnOver_PPP</ProjectName>
         <TargetedPlatforms>2</TargetedPlatforms>
@@ -89,6 +89,7 @@
         <PostBuildEvent><![CDATA[copy /Y "C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\$(PROJECTNAME).dll" "C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\$(PROJECTNAME).auf2"&&if exist "C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\$(PROJECTNAME).dll" del /Q "C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\$(PROJECTNAME).dll"&&if exist "C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\$(PROJECTNAME).rsm" del /Q "C:\ProgramData\aviutl2\Plugin\TurnOver_PPP\$(PROJECTNAME).rsm"]]></PostBuildEvent>
         <PostBuildEventIgnoreExitCode>False</PostBuildEventIgnoreExitCode>
         <Debugger_HostApplication>D:\aviutl2_v2.1.3a\aviutl2.exe</Debugger_HostApplication>
+        <VerInfo_Locale>1041</VerInfo_Locale>
     </PropertyGroup>
     <ItemGroup>
         <DelphiCompile Include="$(MainSource)">
@@ -130,6 +131,10 @@
                 <Source>
                     <Source Name="MainSource">TurnOver_PPP.dpr</Source>
                 </Source>
+                <Excluded_Packages>
+                    <Excluded_Packages Name="$(BDSBIN)\dcloffice2k370.bpl">Microsoft Office 2000 オートメーション サーバー ラッパー コンポーネントのサンプル</Excluded_Packages>
+                    <Excluded_Packages Name="$(BDSBIN)\dclofficexp370.bpl">Microsoft Office XP オートメーション サーバー ラッパー コンポーネントのサンプル</Excluded_Packages>
+                </Excluded_Packages>
             </Delphi.Personality>
             <Platforms>
                 <Platform value="Win32">False</Platform>

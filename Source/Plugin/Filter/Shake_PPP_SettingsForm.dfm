@@ -15,6 +15,7 @@ object FormShakeSettings: TFormShakeSettings
   OnCreate = FormCreate
   OnDestroy = FormDestroy
   OnMouseWheel = FormMouseWheel
+  OnResize = FormResize
   TextHeight = 15
   object PreviewPaintBox: TPaintBox
     Left = 0
@@ -46,6 +47,40 @@ object FormShakeSettings: TFormShakeSettings
       AutoSize = False
       Caption = 'No framebuffer has been captured.'
       EllipsisPosition = epEndEllipsis
+    end
+    object BillowStyleLabel: TLabel
+      Left = 518
+      Top = 9
+      Width = 48
+      Height = 15
+      Caption = #12394#12403#12365#26041
+    end
+    object FixedEdgeLabel: TLabel
+      Left = 754
+      Top = 9
+      Width = 36
+      Height = 15
+      Caption = #22266#23450#36794
+    end
+    object BillowStyleComboBox: TComboBox
+      Left = 574
+      Top = 5
+      Width = 164
+      Height = 23
+      Style = csOwnerDrawFixed
+      TabOrder = 0
+      OnChange = ClothSettingChange
+      OnDrawItem = ClothSettingComboDrawItem
+    end
+    object FixedEdgeComboBox: TComboBox
+      Left = 798
+      Top = 5
+      Width = 92
+      Height = 23
+      Style = csOwnerDrawFixed
+      TabOrder = 1
+      OnChange = ClothSettingChange
+      OnDrawItem = ClothSettingComboDrawItem
     end
   end
 end

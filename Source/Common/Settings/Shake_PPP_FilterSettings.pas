@@ -10,14 +10,17 @@ uses
 
 type
   TTurnOverRuntimeSettings = record
+    AnimationSpeed: Double;
     BacksideStrength: Double;
     CastShadowStrength: Double;
     FoldStrength: Double;
+    GravityStrength: Double;
     GripOffsets: TShakeGripPositions;
     InfluenceRadius: Double;
     LightingStrength: Double;
     RippleCount: Double;
     RippleStrength: Double;
+    ShrinkRate: Double;
     WindDirectionDegrees: Double;
     WindPeriod: Double;
     WindStrength: Double;
@@ -30,6 +33,7 @@ var
   Grip2XItem: TFILTER_ITEM_TRACK;
   Grip2YItem: TFILTER_ITEM_TRACK;
   FoldStrengthItem: TFILTER_ITEM_TRACK;
+  GravityStrengthItem: TFILTER_ITEM_TRACK;
   LightingStrengthItem: TFILTER_ITEM_TRACK;
   BacksideStrengthItem: TFILTER_ITEM_TRACK;
   CastShadowStrengthItem: TFILTER_ITEM_TRACK;
@@ -40,6 +44,8 @@ var
   WindTurbulenceItem: TFILTER_ITEM_TRACK;
   RippleCountItem: TFILTER_ITEM_TRACK;
   RippleStrengthItem: TFILTER_ITEM_TRACK;
+  ShrinkRateItem: TFILTER_ITEM_TRACK;
+  AnimationSpeedItem: TFILTER_ITEM_TRACK;
 
 procedure AddTurnOverFilterItems;
 function CurrentTurnOverRuntimeSettings: TTurnOverRuntimeSettings;
@@ -55,6 +61,8 @@ begin
   AddTrack(Grip1YItem, 'つまみ1 Y', 0.0, -2000.0, 2000.0, 1.0);
   AddTrack(Grip2XItem, 'つまみ2 X', 0.0, -2000.0, 2000.0, 1.0);
   AddTrack(Grip2YItem, 'つまみ2 Y', 0.0, -2000.0, 2000.0, 1.0);
+  AddTrack(ShrinkRateItem, '縮小率', 100.0, 10.0, 100.0, 1.0);
+  AddTrack(GravityStrengthItem, '重力', 0.0, 0.0, 500.0, 1.0);
   AddTrack(WindStrengthItem, '風', 0.0, 0.0, 500.0, 1.0);
   AddTrack(WindPeriodItem, '周期', 60.0, 1.0, 600.0, 1.0);
   AddTrack(WindDirectionItem, '風向', 0.0, -180.0, 180.0, 1.0);
@@ -66,14 +74,19 @@ begin
   AddTrack(LightingStrengthItem, '陰影', 100.0, 0.0, 200.0, 1.0);
   AddTrack(BacksideStrengthItem, '裏面', 35.0, 0.0, 100.0, 1.0);
   AddTrack(CastShadowStrengthItem, '落影', 25.0, 0.0, 100.0, 1.0);
+  { Keep new tracks at the end so existing project item indices remain valid. }
+  AddTrack(AnimationSpeedItem, '速度', 100.0, 0.0, 400.0, 1.0);
 end;
 
 function CurrentTurnOverRuntimeSettings: TTurnOverRuntimeSettings;
 begin
+  Result.AnimationSpeed := AnimationSpeedItem.Value / 100;
   Result.GripOffsets[0].X := Grip1XItem.Value;
   Result.GripOffsets[0].Y := Grip1YItem.Value;
   Result.GripOffsets[1].X := Grip2XItem.Value;
   Result.GripOffsets[1].Y := Grip2YItem.Value;
+  Result.ShrinkRate := ShrinkRateItem.Value / 100;
+  Result.GravityStrength := GravityStrengthItem.Value;
   Result.WindStrength := WindStrengthItem.Value;
   Result.WindPeriod := WindPeriodItem.Value;
   Result.WindDirectionDegrees := WindDirectionItem.Value;

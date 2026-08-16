@@ -27,10 +27,18 @@ function TryEncodeCurveSets(const CurveSets: TShakeCurveSets;
   out Text, ErrorText: string): Boolean; overload;
 function TryDecodeTurnOverCurveData(const Text: string; OuterContour:
   TShakeCurve; var GripVertexIndices: TShakeGripPointVertexIndices;
-  out ErrorText: string): Boolean;
+  out ErrorText: string): Boolean; overload;
+function TryDecodeTurnOverCurveData(const Text: string; OuterContour:
+  TShakeCurve; var GripVertexIndices: TShakeGripPointVertexIndices;
+  var ClothSettings: TTurnOverClothSettings;
+  out ErrorText: string): Boolean; overload;
 function TryEncodeTurnOverCurveData(OuterContour: TShakeCurve;
   const GripVertexIndices: TShakeGripPointVertexIndices;
-  out Text, ErrorText: string): Boolean;
+  out Text, ErrorText: string): Boolean; overload;
+function TryEncodeTurnOverCurveData(OuterContour: TShakeCurve;
+  const GripVertexIndices: TShakeGripPointVertexIndices;
+  const ClothSettings: TTurnOverClothSettings;
+  out Text, ErrorText: string): Boolean; overload;
 
 implementation
 
@@ -44,6 +52,7 @@ const
   CURVE_DATA_PREFIX_V2 = 'SPP2';
   CURVE_DATA_PREFIX_V3 = 'SPP3';
   TURNOVER_DATA_PREFIX_V1 = 'TPP1';
+  TURNOVER_DATA_PREFIX_V2 = 'TPP2';
 
 function InvariantFormatSettings: TFormatSettings;
 begin
@@ -183,13 +192,46 @@ begin
   Result := True;
 end;
 
+function TryEncodeTurnOverSettings(const ClothSettings:
+  TTurnOverClothSettings; out Text, ErrorText: string): Boolean;
+begin
+  Text := '';
+  ErrorText := '';
+  if (Ord(ClothSettings.BillowStyle) <
+    Ord(Low(TTurnOverBillowStyle))) or
+    (Ord(ClothSettings.BillowStyle) >
+    Ord(High(TTurnOverBillowStyle))) or
+    (Ord(ClothSettings.FixedEdge) < Ord(Low(TTurnOverFixedEdge))) or
+    (Ord(ClothSettings.FixedEdge) > Ord(High(TTurnOverFixedEdge))) then
+  begin
+    ErrorText := 'なびき設定が不正です。';
+    Exit(False);
+  end;
+  Text := 'B,' + IntToStr(Ord(ClothSettings.BillowStyle)) + ',' +
+    IntToStr(Ord(ClothSettings.FixedEdge));
+  Result := True;
+end;
+
 function TryEncodeTurnOverCurveData(OuterContour: TShakeCurve;
   const GripVertexIndices: TShakeGripPointVertexIndices;
+  out Text, ErrorText: string): Boolean;
+var
+  ClothSettings: TTurnOverClothSettings;
+begin
+  ClothSettings := DefaultTurnOverClothSettings;
+  Result := TryEncodeTurnOverCurveData(OuterContour, GripVertexIndices,
+    ClothSettings, Text, ErrorText);
+end;
+
+function TryEncodeTurnOverCurveData(OuterContour: TShakeCurve;
+  const GripVertexIndices: TShakeGripPointVertexIndices;
+  const ClothSettings: TTurnOverClothSettings;
   out Text, ErrorText: string): Boolean;
 var
   FormatSettings: TFormatSettings;
   GripText: string;
   OuterText: string;
+  SettingsText: string;
 begin
   Text := '';
   ErrorText := '';
@@ -200,7 +242,11 @@ begin
   if not TryEncodeGripAssignments('G', OuterContour,
     GripVertexIndices[0], GripVertexIndices[1], GripText, ErrorText) then
     Exit(False);
-  Text := TURNOVER_DATA_PREFIX_V1 + '|' + OuterText + '|' + GripText;
+  if not TryEncodeTurnOverSettings(ClothSettings, SettingsText,
+    ErrorText) then
+    Exit(False);
+  Text := TURNOVER_DATA_PREFIX_V2 + '|' + OuterText + '|' + GripText +
+    '|' + SettingsText;
   if Length(Text) > MAX_SHAKE_CURVE_DATA_LENGTH then
   begin
     ErrorText := '曲線データが1行テキストの上限を超えています。';
@@ -345,6 +391,34 @@ begin
   Result := True;
 end;
 
+function TryDecodeTurnOverSettings(const Text: string;
+  out ClothSettings: TTurnOverClothSettings;
+  out ErrorText: string): Boolean;
+var
+  BillowStyleValue: Integer;
+  Fields: TArray<string>;
+  FixedEdgeValue: Integer;
+begin
+  Result := False;
+  ErrorText := '';
+  ClothSettings := DefaultTurnOverClothSettings;
+  Fields := Text.Split([',']);
+  if (Length(Fields) <> 3) or (Fields[0] <> 'B') or
+    not TryStrToInt(Fields[1], BillowStyleValue) or
+    not TryStrToInt(Fields[2], FixedEdgeValue) or
+    (BillowStyleValue < Ord(Low(TTurnOverBillowStyle))) or
+    (BillowStyleValue > Ord(High(TTurnOverBillowStyle))) or
+    (FixedEdgeValue < Ord(Low(TTurnOverFixedEdge))) or
+    (FixedEdgeValue > Ord(High(TTurnOverFixedEdge))) then
+  begin
+    ErrorText := 'なびき設定が不正です。';
+    Exit;
+  end;
+  ClothSettings.BillowStyle := TTurnOverBillowStyle(BillowStyleValue);
+  ClothSettings.FixedEdge := TTurnOverFixedEdge(FixedEdgeValue);
+  Result := True;
+end;
+
 function TryDecodeCurveData(const Text: string; OuterContour,
   CenterContour: TShakeCurve; out ErrorText: string): Boolean;
 var
@@ -411,6 +485,7 @@ function TryDecodeCurveSets(const Text: string;
 var
   FormatSettings: TFormatSettings;
   GripIndex: Integer;
+  IgnoredClothSettings: TTurnOverClothSettings;
   I: Integer;
   Parts: TArray<string>;
   TemporaryGripVertexIndices: TShakeGripVertexIndices;
@@ -452,7 +527,10 @@ begin
   try
     Parts := Text.Split(['|']);
     FormatSettings := InvariantFormatSettings;
-    if (Length(Parts) = 3) and (Parts[0] = TURNOVER_DATA_PREFIX_V1) then
+    if ((Length(Parts) = 3) and
+      (Parts[0] = TURNOVER_DATA_PREFIX_V1)) or
+      ((Length(Parts) = 4) and
+      (Parts[0] = TURNOVER_DATA_PREFIX_V2)) then
     begin
       if not TryDecodeCurve(Parts[1], 'O', FormatSettings,
         TemporarySets[0].OuterContour, ErrorText) or
@@ -460,6 +538,10 @@ begin
         TemporarySets[0].OuterContour,
         TemporaryGripVertexIndices[0, 0],
         TemporaryGripVertexIndices[0, 1], ErrorText) then
+        Exit;
+      if (Parts[0] = TURNOVER_DATA_PREFIX_V2) and
+        not TryDecodeTurnOverSettings(Parts[3],
+        IgnoredClothSettings, ErrorText) then
         Exit;
     end
     else if (Length(Parts) = 3) and (Parts[0] = CURVE_DATA_PREFIX_V1) then
@@ -529,12 +611,26 @@ function TryDecodeTurnOverCurveData(const Text: string; OuterContour:
   TShakeCurve; var GripVertexIndices: TShakeGripPointVertexIndices;
   out ErrorText: string): Boolean;
 var
+  ClothSettings: TTurnOverClothSettings;
+begin
+  Result := TryDecodeTurnOverCurveData(Text, OuterContour,
+    GripVertexIndices, ClothSettings, ErrorText);
+end;
+
+function TryDecodeTurnOverCurveData(const Text: string; OuterContour:
+  TShakeCurve; var GripVertexIndices: TShakeGripPointVertexIndices;
+  var ClothSettings: TTurnOverClothSettings;
+  out ErrorText: string): Boolean;
+var
   I: Integer;
+  Parts: TArray<string>;
+  TemporaryClothSettings: TTurnOverClothSettings;
   TemporaryGripVertexIndices: TShakeGripVertexIndices;
   TemporarySets: TShakeCurveSets;
 begin
   Result := False;
   ErrorText := '';
+  TemporaryClothSettings := DefaultTurnOverClothSettings;
   if OuterContour = nil then
   begin
     ErrorText := '布の範囲の読み込み先がありません。';
@@ -549,8 +645,15 @@ begin
     if not TryDecodeCurveSets(Text, TemporarySets,
       TemporaryGripVertexIndices, ErrorText) then
       Exit;
+    Parts := Text.Split(['|']);
+    if (Length(Parts) = 4) and
+      (Parts[0] = TURNOVER_DATA_PREFIX_V2) and
+      not TryDecodeTurnOverSettings(Parts[3], TemporaryClothSettings,
+      ErrorText) then
+      Exit;
     OuterContour.Assign(TemporarySets[0].OuterContour);
     GripVertexIndices := TemporaryGripVertexIndices[0];
+    ClothSettings := TemporaryClothSettings;
     Result := True;
   finally
     for I := SHAKE_CURVE_SET_COUNT - 1 downto 0 do
